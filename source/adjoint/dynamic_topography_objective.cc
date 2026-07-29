@@ -101,6 +101,8 @@ namespace aspect
       double local_objective = 0.0;
       std::vector<double> topo_values(quadrature_formula_face.size());
 
+      // The objective is a surface integral over the top boundary only:
+      // 1/2 * ||h - h_target||^2.
       for (const auto &cell : this->get_dof_handler().active_cell_iterators())
         if (cell->is_locally_owned())
           for (const unsigned int f : cell->face_indices())
@@ -195,6 +197,8 @@ namespace aspect
                                                  this->get_mpi_communicator());
       cbf_mass_matrix = 0.0;
 
+      // The adjoint RHS is assembled by applying the transpose of the
+      // dynamic-topography postprocessing chain to the topography misfit.
       double local_top_area = 0.0;
       double local_surface_pressure_weight = 0.0;
 
@@ -533,6 +537,10 @@ namespace aspect
                                                  this->get_mpi_communicator());
       cbf_mass_matrix = 0.0;
 
+      // Direct kernels account for material-property dependencies inside the
+      // dynamic-topography postprocessor itself. The volume Stokes terms are
+      // handled separately by KernelCalculator through the adjoint state.
+
       // Kernels are stored as cell averages, so first collect cell volumes
       // and divide accumulated cell-integrated contributions at the end.
       for (const auto &cell : this->get_dof_handler().active_cell_iterators())
@@ -598,6 +606,7 @@ namespace aspect
       cbf_mass_matrix.compress(VectorOperation::add);
 
       std::map<types::global_dof_index, std::pair<unsigned int, double>> density_surface_by_topography_dof;
+
       // Direct density derivative of the denominator in
       // h = normal_stress / ((rho - rho_above) |g|). This term uses the
       // actual computed h, multiplied by the misfit seed J_h.

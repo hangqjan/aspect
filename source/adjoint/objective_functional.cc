@@ -104,6 +104,9 @@ namespace aspect
                              "'Adjoint/List of objectives' contains entries more than once. "
                              "This is not allowed. Please check your parameter file."));
 
+      // Instantiate each selected objective through the ASPECT plugin
+      // registry. The order is preserved so that objective results and
+      // adjoint states can later be paired by index.
       for (const std::string &objective_name : this->plugin_names)
         {
           this->plugin_objects.emplace_back(std::get<dim>(registered_objectives)
@@ -155,6 +158,8 @@ namespace aspect
            objective_index < objective_names.size();
            ++objective_index, ++objective)
         {
+          // Keep the scalar objective value and its adjoint right hand side
+          // together. The manager solves one adjoint system for each result.
           auto result = std::make_unique<ObjectiveResult<dim>>();
           result->objective_name = objective_names[objective_index];
           result->value = (*objective)->evaluate();

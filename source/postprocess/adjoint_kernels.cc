@@ -72,6 +72,9 @@ namespace aspect
           const Vector<double> &values = entry.second;
           double local_integral = 0.0;
 
+          // Kernel values are stored as cell averages. Multiplying by cell
+          // volume gives the integral contribution of this objective, physics
+          // term, and physical property.
           for (const auto &cell : this->get_triangulation().active_cell_iterators())
             if (cell->is_locally_owned())
               {

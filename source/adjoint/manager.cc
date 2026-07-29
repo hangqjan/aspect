@@ -131,6 +131,9 @@ namespace aspect
                   objective_names.end(),
                   "dynamic topography") != objective_names.end();
 
+      // Objective-specific checks live here until the corresponding adjoint
+      // physics terms are generalized beyond the current dynamic-topography
+      // implementation.
       if (uses_dynamic_topography_objective)
         AssertThrow(this->get_postprocess_manager().template has_matching_active_plugin<Postprocess::DynamicTopography<dim>>(),
                     ExcMessage("The dynamic topography adjoint objective requires the dynamic topography postprocessor. "
@@ -196,6 +199,9 @@ namespace aspect
 
           simulator->system_rhs = objective_result->rhs;
 
+          // Reuse the existing Stokes solver for the adjoint equation by
+          // replacing only the right hand side and clearing the Stokes blocks
+          // that will receive the adjoint solution.
           simulator->current_linearization_point.block(velocity_block_index) = 0.0;
           simulator->current_linearization_point.block(pressure_block_index) = 0.0;
           simulator->solution.block(velocity_block_index) = 0.0;
@@ -205,6 +211,9 @@ namespace aspect
           adjoint_states.push_back(std::move(adjoint_state));
         }
 
+      // Restore the forward state so that later postprocessors and simulator
+      // code see exactly the forward solution, not the temporary adjoint solve
+      // state.
       simulator->solution = saved_solution;
       simulator->current_linearization_point = saved_linearization_point;
       simulator->system_rhs = saved_system_rhs;
@@ -233,6 +242,8 @@ namespace aspect
 
       validate_instantaneous_stokes_setup();
 
+      // First compute the forward Stokes state. All following adjoint
+      // quantities are sensitivities of objectives evaluated at this state.
       simulator->assemble_and_solve_stokes();
 
       prepare_required_forward_postprocessors();

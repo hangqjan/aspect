@@ -122,6 +122,8 @@ namespace aspect
                               update_quadrature_points |
                               update_JxW_values);
 
+      // Kernels are kept separate for each objective. This lets users inspect
+      // or combine objective contributions explicitly after output.
       for (unsigned int objective_index = 0; objective_index < objective_results.size(); ++objective_index)
         {
           const std::string &objective_name = objective_results[objective_index]->objective_name;
@@ -169,6 +171,9 @@ namespace aspect
                           adjoint_operator_strain += local_adjoint_values[i] * epsilon_phi_u;
                         }
 
+                    // Accumulate cell-integrated derivatives of the
+                    // incompressible Stokes residual with respect to physical
+                    // density and viscosity controls.
                     cell_volumes(cell_index) += JxW;
                     density_volume(cell_index) += -(gravity * adjoint_in.velocity[q]) * JxW;
                     // Physical-property viscosity controls are additive
@@ -185,6 +190,8 @@ namespace aspect
 
               }
 
+          // Store cell-average kernels. The output postprocessor multiplies by
+          // cell volume again when reporting contribution integrals.
           for (const auto &cell : this->get_dof_handler().active_cell_iterators())
             if (cell->is_locally_owned())
               {

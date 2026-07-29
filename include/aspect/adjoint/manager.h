@@ -137,15 +137,32 @@ namespace aspect
         get_objective_values() const;
 
       private:
+        /**
+         * Check that the currently selected forward model and objectives are
+         * supported by the instantaneous Stokes adjoint workflow.
+         */
         void
         validate_instantaneous_stokes_setup() const;
 
+        /**
+         * Execute forward postprocessors required by active objective
+         * functionals before objective values and adjoint right hand sides are
+         * assembled.
+         */
         void
         prepare_required_forward_postprocessors();
 
+        /**
+         * Solve one adjoint Stokes system for each assembled objective right
+         * hand side and store the resulting adjoint states.
+         */
         void
         solve_adjoint_states();
 
+        /**
+         * Compute physical-property kernels from the forward solution and
+         * adjoint states, then add objective-specific direct contributions.
+         */
         void
         calculate_kernels();
 
