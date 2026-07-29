@@ -123,6 +123,9 @@ namespace aspect
     {
       std::set<std::string> postprocessors_to_execute = requested_postprocessors;
 
+      // A dependency can itself depend on another postprocessor, so keep adding
+      // dependencies of the requested postprocessors until no new dependencies
+      // are found.
       bool dependency_list_changed = true;
       while (dependency_list_changed)
         {
@@ -143,6 +146,8 @@ namespace aspect
             }
         }
 
+      // Only active postprocessors can be executed because inactive ones have
+      // not been created, parsed, or initialized.
       for (const std::string &postprocessor_name : postprocessors_to_execute)
         AssertThrow(std::find(this->plugin_names.begin(),
                               this->plugin_names.end(),
@@ -150,6 +155,8 @@ namespace aspect
                     ExcMessage("The selected postprocessor <" + postprocessor_name
                                + "> is not active."));
 
+      // Execute the selected postprocessors in the order established during
+      // parse_parameters(), which sorts active postprocessors by dependency.
       std::list<std::pair<std::string,std::string>> output_list;
       auto plugin = this->plugin_objects.begin();
       for (unsigned int i = 0;
@@ -162,14 +169,23 @@ namespace aspect
 
           try
             {
+              // first call the update() function.
               (*plugin)->update();
 
+              // call the execute() function. if it produces any output
+              // then add it to the list
               const std::pair<std::string,std::string> output =
                 (*plugin)->execute(statistics);
 
               if (output.first.size() + output.second.size() > 0)
                 output_list.push_back(output);
             }
+          // postprocessors that throw exceptions usually do not result in
+          // anything good because they result in an unwinding of the stack
+          // and, if only one processor triggers an exception, the
+          // destruction of objects often causes a deadlock. thus, if
+          // an exception is generated, catch it, print an error message,
+          // and abort the program
           catch (std::exception &exc)
             {
               std::cerr << std::endl << std::endl
@@ -185,6 +201,7 @@ namespace aspect
                         << "----------------------------------------------------"
                         << std::endl;
 
+              // terminate the program!
               MPI_Abort (MPI_COMM_WORLD, 1);
             }
           catch (...)
@@ -202,6 +219,7 @@ namespace aspect
                         << "----------------------------------------------------"
                         << std::endl;
 
+              // terminate the program!
               MPI_Abort (MPI_COMM_WORLD, 1);
             }
         }

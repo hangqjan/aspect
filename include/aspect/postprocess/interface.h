@@ -149,6 +149,13 @@ namespace aspect
          * depend on. The selected postprocessors are identified by the names used
          * in parameter files. The function keeps the dependency order established
          * during parse_parameters().
+         *
+         * @param requested_postprocessors The names of active postprocessors that
+         * should be executed.
+         * @param statistics The statistics object that is passed to each selected
+         * postprocessor.
+         * @return The concatenated text output returned by the selected
+         * postprocessors and their dependencies.
          */
         std::list<std::pair<std::string,std::string>>
         execute_selected_postprocessors(const std::set<std::string> &requested_postprocessors,
