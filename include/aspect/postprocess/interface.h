@@ -153,7 +153,9 @@ namespace aspect
          * @param requested_postprocessors The names of active postprocessors that
          * should be executed.
          * @param statistics The statistics object that is passed to each selected
-         * postprocessor.
+         * postprocessor. Selected postprocessors may add entries to this object,
+         * so callers that need the computed postprocessor state without changing
+         * the main statistics table should pass a temporary TableHandler.
          * @return The concatenated text output returned by the selected
          * postprocessors and their dependencies.
          */

@@ -23,6 +23,7 @@
 #include <aspect/utilities.h>
 
 #include <algorithm>
+#include <iterator>
 #include <set>
 #include <typeinfo>
 
@@ -121,42 +122,66 @@ namespace aspect
     Manager<dim>::execute_selected_postprocessors(const std::set<std::string> &requested_postprocessors,
                                                   TableHandler &statistics)
     {
-      std::set<std::string> postprocessors_to_execute = requested_postprocessors;
+      // Collect both the explicitly requested postprocessors and all of their
+      // direct and indirect dependencies. The set prevents the same
+      // postprocessor from being added more than once.
+      std::set<std::string> postprocessors_to_execute =
+        requested_postprocessors;
 
-      // A dependency can itself depend on another postprocessor, so keep adding
-      // dependencies of the requested postprocessors until no new dependencies
-      // are found.
-      bool dependency_list_changed = true;
-      while (dependency_list_changed)
-        {
-          dependency_list_changed = false;
+      // Keep a separate work list of postprocessors whose dependencies have
+      // not yet been inspected. Newly discovered dependencies are appended to
+      // this list so that dependencies of dependencies are included as well.
+      std::list<std::string> postprocessors_to_check(
+        requested_postprocessors.begin(),
+        requested_postprocessors.end());
 
-          auto plugin = this->plugin_objects.begin();
-          for (unsigned int i = 0;
-               i < this->plugin_names.size();
-               ++i, ++plugin)
-            {
-              if (postprocessors_to_execute.find(this->plugin_names[i])
-                  == postprocessors_to_execute.end())
-                continue;
+      // Return the plugin object associated with an active postprocessor name.
+      //
+      // plugin_names and plugin_objects are parallel containers, so the
+      // position of a name in plugin_names identifies the corresponding entry
+      // in plugin_objects.
+      const auto find_active_postprocessor =
+        [this](const std::string &postprocessor_name)
+      {
+        const auto name_position =
+          std::find(this->plugin_names.begin(),
+                    this->plugin_names.end(),
+                    postprocessor_name);
 
-              for (const std::string &dependency : (*plugin)->required_other_postprocessors())
-                if (postprocessors_to_execute.insert(dependency).second)
-                  dependency_list_changed = true;
-            }
-        }
-
-      // Only active postprocessors can be executed because inactive ones have
-      // not been created, parsed, or initialized.
-      for (const std::string &postprocessor_name : postprocessors_to_execute)
-        AssertThrow(std::find(this->plugin_names.begin(),
-                              this->plugin_names.end(),
-                              postprocessor_name) != this->plugin_names.end(),
+        // This also validates dependencies declared by active postprocessors:
+        // every requested dependency must itself be active.
+        AssertThrow(name_position != this->plugin_names.end(),
                     ExcMessage("The selected postprocessor <" + postprocessor_name
                                + "> is not active."));
 
+        return std::next(this->plugin_objects.begin(),
+                         std::distance(this->plugin_names.begin(),
+                                       name_position));
+      };
+
+      // Traverse the dependency graph starting from the requested
+      // postprocessors. Each postprocessor is added to postprocessors_to_check
+      // only when it is first discovered, so its dependencies are inspected at
+      // most once.
+      while (postprocessors_to_check.empty() == false)
+        {
+          const std::string postprocessor_name = postprocessors_to_check.front();
+          postprocessors_to_check.pop_front();
+
+          const auto plugin = find_active_postprocessor(postprocessor_name);
+
+          for (const std::string &dependency : (*plugin)->required_other_postprocessors())
+            {
+              // std::set::insert().second is true only for a newly discovered
+              // dependency. Only new dependencies need to be inspected further.
+              if (postprocessors_to_execute.insert(dependency).second)
+                postprocessors_to_check.push_back(dependency);
+            }
+        }
+
       // Execute the selected postprocessors in the order established during
-      // parse_parameters(), which sorts active postprocessors by dependency.
+      // parse_parameters(). That ordering already places dependencies before
+      // the postprocessors that require them.
       std::list<std::pair<std::string,std::string>> output_list;
       auto plugin = this->plugin_objects.begin();
       for (unsigned int i = 0;
@@ -167,18 +192,20 @@ namespace aspect
               == postprocessors_to_execute.end())
             continue;
 
+          const auto &p = *plugin;
+
           try
             {
               // first call the update() function.
-              (*plugin)->update();
+              p->update();
 
               // call the execute() function. if it produces any output
               // then add it to the list
-              const std::pair<std::string,std::string> output =
-                (*plugin)->execute(statistics);
+              std::pair<std::string,std::string> output
+                = p->execute (statistics);
 
               if (output.first.size() + output.second.size() > 0)
-                output_list.push_back(output);
+                output_list.push_back (output);
             }
           // postprocessors that throw exceptions usually do not result in
           // anything good because they result in an unwinding of the stack
@@ -194,7 +221,7 @@ namespace aspect
               std::cerr << "Exception on MPI process <"
                         << Utilities::MPI::this_mpi_process(MPI_COMM_WORLD)
                         << "> while running postprocessor <"
-                        << typeid(**plugin).name()
+                        << typeid(*p).name()
                         << ">: " << std::endl
                         << exc.what() << std::endl
                         << "Aborting!" << std::endl
@@ -212,7 +239,7 @@ namespace aspect
               std::cerr << "Exception on MPI process <"
                         << Utilities::MPI::this_mpi_process(MPI_COMM_WORLD)
                         << "> while running postprocessor <"
-                        << typeid(**plugin).name()
+                        << typeid(*p).name()
                         << ">: " << std::endl;
               std::cerr << "Unknown exception!" << std::endl
                         << "Aborting!" << std::endl
