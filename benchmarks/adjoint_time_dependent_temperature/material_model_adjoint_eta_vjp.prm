@@ -1,0 +1,32 @@
+# Standalone MaterialModelAdjoint VJP diagnostic for eta(T,C).
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/plugin/libadjoint_material_model.so
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition_real_density_av.prm
+
+set Output directory = output-material-model-adjoint-eta-vjp
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run material model adjoint VJP test = true
+  end
+end
+
+subsection Material model
+  set Model name = adjoint material model
+  set Material averaging = none
+
+  subsection Adjoint material model
+    set Reference density = 1
+    set Reference specific heat = 1
+    set Reference temperature = 0
+    set Thermal expansion coefficient = 1e-3
+    set Specific heat temperature coefficient = 0
+    set Density differential for compositional field 1 = 0.2
+    set Viscosity = 0.05
+    set Viscosity temperature coefficient = 0.15
+    set Viscosity composition coefficient = -0.25
+    set Thermal conductivity = 1e-6
+  end
+end

@@ -1,0 +1,2676 @@
+// Consolidated adjoint module: core
+// Each section begins with its original repository path.
+
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/failure_injection.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#ifndef _aspect_adjoint_core_failure_injection_h
+#define _aspect_adjoint_core_failure_injection_h
+
+#include <aspect/global.h>
+
+#include <string>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace Diagnostics
+    {
+      /** Transaction boundaries at which a lifecycle test may interrupt. */
+      enum class LifecycleFailurePoint
+      {
+        none,
+        before_checkpoint_commit,
+        after_checkpoint_commit_before_cleanup,
+        during_cleanup,
+        after_cleanup
+      };
+
+      /** Collective boundaries of the reverse-checkpoint transaction. */
+      enum class CheckpointFailurePoint
+      {
+        none,
+        after_temporary_directory_creation,
+        after_rank_payload_write,
+        before_metadata_publication,
+        after_metadata_publication,
+        before_latest_publication,
+        after_latest_publication
+      };
+
+      /** Collective boundaries of a trajectory cleanup transaction. */
+      enum class CleanupFailurePoint
+      {
+        none,
+        before_cleanup,
+        after_rank_payload_deletion,
+        before_collective_success,
+        before_manifest_update,
+        after_segment_deletion,
+        after_manifest_update
+      };
+
+      /** Collective boundaries of a shared trajectory append transaction. */
+      enum class AppendFailurePoint
+      {
+        none,
+        after_local_serialization,
+        after_collective_payload_write,
+        after_payload_write,
+        after_manifest_publication
+      };
+
+      /**
+       * Test-only description of one rank-local failure. A negative rank
+       * consistently selects rank zero, matching the historical test driver.
+       */
+      template <typename FailurePoint>
+      struct FailureInjection
+      {
+        FailurePoint point = FailurePoint::none;
+        int rank = -1;
+
+        bool
+        applies_to_rank(const unsigned int current_rank) const
+        {
+          const unsigned int selected_rank =
+            rank < 0 ? 0 : static_cast<unsigned int>(rank);
+          return point != FailurePoint::none && current_rank == selected_rank;
+        }
+      };
+
+      LifecycleFailurePoint parse_lifecycle_failure_point(const std::string &name);
+      CheckpointFailurePoint parse_checkpoint_failure_point(const std::string &name);
+      CleanupFailurePoint parse_cleanup_failure_point(const std::string &name);
+      AppendFailurePoint parse_append_failure_point(const std::string &name);
+
+      std::string to_string(const LifecycleFailurePoint point);
+    }
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/failure_injection.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/instantaneous_stokes_workflow.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#ifndef _aspect_adjoint_core_instantaneous_stokes_workflow_h
+#define _aspect_adjoint_core_instantaneous_stokes_workflow_h
+
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/simulator_access.h>
+
+namespace aspect
+{
+  template <int dim> class Simulator;
+
+  namespace Adjoint
+  {
+    /**
+     * Production workflow for objectives of one Stokes state. It owns no
+     * persistent result data: the facade supplies repositories that remain
+     * valid after the workflow returns.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class InstantaneousStokesWorkflow : public SimulatorAccess<dim>
+    {
+      public:
+        InstantaneousStokesWorkflow(Simulator<dim> &simulator,
+                                    Objective::Manager<dim> &objective_manager);
+
+        void
+        run(std::vector<std::unique_ptr<ObjectiveResult>> &objective_results,
+            std::vector<std::unique_ptr<AdjointState>> &adjoint_states,
+            KernelRepository<dim> &kernels);
+
+      private:
+        void validate_setup() const;
+        void prepare_required_forward_postprocessors();
+
+        Simulator<dim> &simulator;
+        Objective::Manager<dim> &objective_manager;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/instantaneous_stokes_workflow.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/kernel_calculator.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_core_kernel_calculator_h
+#define _aspect_adjoint_core_kernel_calculator_h
+
+#include <aspect/adjoint/core/state.h>
+#include <aspect/adjoint/core/types.h>
+#include <aspect/global.h>
+#include <aspect/simulator_access.h>
+
+#include <deal.II/lac/vector.h>
+
+#include <map>
+#include <memory>
+#include <vector>
+
+namespace aspect
+{
+  template <int dim> class Simulator;
+
+  namespace Adjoint
+  {
+    /**
+     * A data structure that stores cellwise adjoint kernel contributions.
+     * Contributions are kept separated by objective, physical property, and
+     * physics term so that output plugins can inspect or combine them
+     * explicitly.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class KernelRepository
+    {
+      public:
+        /**
+         * Add one kernel contribution to the repository.
+         *
+         * @param key The key that identifies objective, physics term, and
+         * physical property of the contribution.
+         * @param values The cellwise values of the contribution.
+         */
+        void
+        add_contribution(const KernelContributionKey &key,
+                         const Vector<double> &values);
+
+        /**
+         * Store the cell volumes associated with the cellwise kernel values.
+         *
+         * @param values The volume of every active cell, indexed by active
+         * cell index.
+         */
+        void
+        set_cell_volumes(const Vector<double> &values);
+
+        /**
+         * Return the cell volumes associated with the stored kernel values.
+         *
+         * @return The cell volume vector.
+         */
+        const Vector<double> &
+        cell_volumes() const;
+
+        /**
+         * Return whether the repository contains no kernel contributions.
+         *
+         * @return true if no kernel contributions are stored.
+         */
+        bool
+        empty() const;
+
+        /**
+         * Return the number of kernel contributions stored in the repository.
+         *
+         * @return The number of kernel contributions.
+         */
+        unsigned int
+        n_contributions() const;
+
+        /**
+         * Return all stored kernel contributions.
+         *
+         * @return A map from contribution keys to cellwise contribution
+         * values.
+         */
+        const std::map<KernelContributionKey, Vector<double>> &
+        contributions() const;
+
+      private:
+        std::map<KernelContributionKey, Vector<double>> contribution_map;
+        Vector<double> cell_volume_values;
+    };
+
+
+
+    /**
+     * A class that computes physical-property adjoint kernels from the
+     * current forward solution and one adjoint state per objective.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class KernelCalculator : public SimulatorAccess<dim>
+    {
+      public:
+        /**
+         * Constructor.
+         *
+         * @param simulator The simulator object that provides access to the
+         * forward model state and finite element data.
+         */
+        explicit KernelCalculator(const Simulator<dim> &simulator);
+
+        /**
+         * Calculate physical-property kernels from the current forward solution and the
+         * adjoint states associated with the objective results.
+         *
+         * @param objective_results The objective values and adjoint right hand
+         * sides associated with each objective.
+         * @param adjoint_states The adjoint solutions associated with each
+         * objective in @p objective_results.
+         *
+         * @return A repository containing the computed physical-property
+         * kernels.
+         */
+        KernelRepository<dim>
+        calculate(const std::vector<std::unique_ptr<ObjectiveResult>> &objective_results,
+                  const std::vector<std::unique_ptr<AdjointState>> &adjoint_states) const;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/kernel_calculator.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/manager.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_core_manager_h
+#define _aspect_adjoint_core_manager_h
+
+#include <aspect/advection_field.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/adjoint/optimization/initial_temperature_control.h>
+#include <aspect/adjoint/optimization/initial_temperature_optimization.h>
+#include <aspect/adjoint/time_dependent/time_dependent_workflow.h>
+#include <aspect/adjoint/time_dependent/trajectory_manager.h>
+#include <aspect/adjoint/diagnostics/diagnostics.h>
+#include <aspect/global.h>
+#include <aspect/simulator_access.h>
+
+#include <deal.II/base/parameter_handler.h>
+
+#include <deque>
+#include <limits>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace aspect
+{
+  template <int dim> class Simulator;
+
+  namespace Adjoint
+  {
+    /**
+     * Simulator-facing facade for adjoint workflows.
+     *
+     * This class owns parameter state, initializes objective, workflow,
+     * trajectory, optimization, and diagnostics components, dispatches the
+     * selected steady or reverse-time workflow, and exposes completed scalar
+     * objectives and gradients. Discrete operator implementations belong to
+     * the corresponding component rather than to the facade.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class Manager : public SimulatorAccess<dim>
+    {
+      public:
+        /**
+         * Constructor.
+         */
+        Manager();
+
+        /**
+         * Declare the parameters used by the adjoint manager and its
+         * subobjects.
+         *
+         * @param prm The parameter handler in which parameters are declared.
+         */
+        static
+        void
+        declare_parameters (ParameterHandler &prm);
+
+        /**
+         * Initialize this manager and all objective plugins with access to the
+         * simulator object. Unlike most SimulatorAccess users, the adjoint
+         * manager needs mutable access to the simulator: the instantaneous
+         * adjoint solve temporarily replaces the Stokes right hand side and
+         * solution vectors, calls simulator solve routines, and then restores
+         * the forward state.
+         *
+         * This function is therefore the only valid initialization path for
+         * this class. It stores the mutable simulator pointer used by the
+         * adjoint workflow, initializes the SimulatorAccess base class for
+         * standard read-only simulator queries, and forwards simulator access
+         * to the contained objective manager.
+         *
+         * @param simulator The simulator object that owns the forward model
+         * and adjoint workflow.
+         */
+        void
+        initialize_simulator(Simulator<dim> &simulator);
+
+        /**
+         * Override the generic SimulatorAccess initialization interface, but
+         * reject it deliberately. The base class interface only provides a
+         * const simulator reference, which would leave this manager without
+         * the mutable simulator access required by solve_instantaneous_stokes().
+         *
+         * Defining this override prevents accidental initialization through a
+         * SimulatorAccess pointer from silently setting only the base-class
+         * simulator pointer. Call initialize_simulator(Simulator<dim> &) on
+         * the concrete adjoint manager instead.
+         */
+        void
+        initialize_simulator(const Simulator<dim> &simulator) override;
+
+        /**
+         * Read adjoint parameters from the parameter file and create the
+         * selected objective plugins.
+         *
+         * @param prm The parameter handler from which adjoint parameters are
+         * read.
+         */
+        void
+        parse_parameters(ParameterHandler &prm);
+
+        /**
+         * Initialize the adjoint manager after parameters have been parsed.
+         */
+        void
+        initialize();
+
+        /**
+         * Run the instantaneous Stokes adjoint workflow for the current model.
+         */
+        void
+        solve_instantaneous_stokes();
+
+        /**
+         * Return whether the transient temperature adjoint workflow is active.
+         */
+        bool
+        time_dependent_temperature_workflow_enabled() const;
+
+        bool optimization_enabled() const;
+
+        /** Run the opt-in native ROL reduced initial-temperature solve. */
+        void run_initial_temperature_optimization();
+
+        /**
+         * Store one unique accepted physical state and its accepted outgoing
+         * replay schedule entry in the trajectory archive.
+         */
+        void
+        record_forward_snapshot(const double outgoing_time_step,
+                                const bool has_outgoing_step);
+
+        /** Mark the last accepted forward state as the terminal trajectory state. */
+        void
+        mark_forward_snapshot_terminal();
+
+        /**
+         * Run the time-dependent temperature reverse workflow and write the
+         * initial-temperature gradient.
+         */
+        void
+        finalize_time_dependent_temperature();
+
+        /** Return whether a committed reverse checkpoint should be resumed. */
+        bool
+        has_pending_adjoint_restart() const;
+
+        /**
+         * Return the most recently computed physical-property kernels.
+         *
+         * @return The kernel repository.
+         */
+        const KernelRepository<dim> &
+        get_kernels() const;
+
+        /**
+         * Return the most recently evaluated objective values.
+         *
+         * @return A map from objective functional names to objective values.
+         */
+        std::map<std::string, double>
+        get_objective_values() const;
+
+        /**
+         * Return the latest initial-temperature gradient computed by the
+         * time-dependent temperature adjoint workflow.
+         */
+        const LinearAlgebra::BlockVector &
+        get_initial_temperature_gradient() const;
+
+        /**
+         * Return the latest initial-composition gradients computed by the
+         * time-dependent temperature adjoint workflow.
+         */
+        const std::vector<LinearAlgebra::BlockVector> &
+        get_initial_composition_gradients() const;
+
+        /**
+         * Capture the canonical pre-forward state for a later in-memory
+         * optimization evaluation. This is intentionally separate from the
+         * ordinary checkpoint/restart format.
+         */
+        void capture_optimization_initial_state();
+
+        /**
+         * Restore the canonical pre-forward state and invalidate all
+         * evaluation-owned adjoint/runtime caches. This is the O3 reset
+         * primitive; it does not run a forward solve itself.
+         */
+        void restore_optimization_initial_state();
+
+        bool has_optimization_initial_state() const;
+
+        /** Install T_fixed + P m after an O3 baseline restore. */
+        void install_initial_temperature_control(const LinearAlgebra::Vector &control);
+
+        /** Replace the physical baseline in T_ic = T_fixed + Pm. */
+        void
+        set_optimization_initial_temperature_baseline(const LinearAlgebra::Vector &baseline);
+
+        /** Return the current physical initial-temperature baseline. */
+        const LinearAlgebra::Vector &
+        get_optimization_initial_temperature_baseline() const;
+
+        /**
+         * Express a representable physical temperature as the reduced
+         * increment from the installed baseline.
+         */
+        LinearAlgebra::Vector
+        reduced_control_from_physical_temperature(const LinearAlgebra::Vector &temperature);
+
+        /** Return per-control bounds enforcing 0 <= T_fixed + Pm <= 1. */
+        std::pair<LinearAlgebra::Vector, LinearAlgebra::Vector>
+        initial_temperature_control_physical_bounds();
+
+        /** Return nodal extrema of the physical field T_fixed + Pm. */
+        std::pair<double, double>
+        initial_temperature_control_physical_min_max(
+          const LinearAlgebra::Vector &control);
+
+        /** Return the finite-element L2 reconstruction error of T_fixed + Pm. */
+        double
+        initial_temperature_control_reconstruction_error_l2(
+          const LinearAlgebra::Vector &control,
+          const LinearAlgebra::Vector &temperature);
+
+        /**
+         * Return the immutable reduced initial-temperature control space and
+         * its cached L2 metric after restoring the O3 canonical baseline.
+         */
+        const InitialTemperatureControl<dim> &get_initial_temperature_control_space();
+
+        /** Capture the current terminal state as the temperature observation. */
+        void set_terminal_temperature_observation_from_current_state();
+
+        /**
+         * Evaluate an initial-temperature control from the canonical in-memory
+         * baseline. When @p l2_gradient is non-null, run the matching reverse
+         * sweep and return its reduced L2 Riesz representative in that vector.
+         */
+        std::map<std::string, double>
+        evaluate_initial_temperature_control(const LinearAlgebra::Vector &control,
+                                             LinearAlgebra::Vector *l2_gradient = nullptr);
+
+        /**
+         * Complete the reverse half of the immediately preceding
+         * value-only initial-temperature control evaluation. This is an
+         * O4/O5 optimization entry point: it never restores the baseline or
+         * reruns the forward model, and is therefore valid only while that
+         * forward trajectory is still the active manager state.
+         */
+        std::map<std::string, double>
+        complete_initial_temperature_control_gradient(LinearAlgebra::Vector &l2_gradient);
+
+      private:
+        friend class TimeDependentWorkflow<dim>;
+        friend class TrajectoryManager<dim>;
+        friend class Diagnostics::InitialTemperatureOptimizationChecks<dim>;
+
+        using ReconstructedTrajectoryState =
+          typename TrajectoryManager<dim>::ReconstructedTrajectoryState;
+        using ForwardReplayWindow =
+          typename TrajectoryManager<dim>::ForwardReplayWindow;
+
+        /** Focused O3 regression: evaluate m0, m1, then m0 in one process. */
+        void run_initial_temperature_control_reuse_diagnostic();
+
+        /** Focused O3 regression: evaluate only the canonical zero control. */
+        void run_initial_temperature_control_single_evaluation_diagnostic();
+
+        /** Focused O3 regression: check a reduced-space PDE Taylor expansion. */
+        void run_initial_temperature_control_taylor_diagnostic();
+
+        /** Execute one post-run O3 initialization stage and then return. */
+        void run_initial_temperature_control_initialization_diagnostic(
+          const unsigned int stage);
+
+        double temperature_l2_difference(const LinearAlgebra::Vector &first,
+                                         const LinearAlgebra::Vector &second) const;
+
+        void ensure_initial_temperature_control_space();
+
+        /**
+         * Check that the transient temperature workflow is used only in the
+         * narrow v1 support envelope.
+         */
+        void
+        validate_time_dependent_temperature_setup() const;
+
+        /**
+         * Solve a Stokes adjoint system from an already assembled full-system
+         * right hand side.
+         */
+        void
+        solve_stokes_adjoint_from_rhs(
+          const LinearAlgebra::BlockVector &right_hand_side,
+          LinearAlgebra::BlockVector &adjoint_solution);
+
+        /**
+         * Write the latest initial-temperature gradient to one text file per
+         * MPI rank.
+         */
+        void
+        write_initial_temperature_gradient() const;
+
+        /**
+         * Write the latest initial-composition gradients to one text file per
+         * compositional field and MPI rank.
+         */
+        void
+        write_initial_composition_gradients() const;
+
+        /**
+         * Apply the transpose of the advection-field dependence in the Stokes
+         * right hand side for one restored forward state.
+         */
+        void
+        add_stokes_field_transpose(const AdvectionField &advection_field,
+                                   const ForwardStateView<dim> &snapshot,
+                                   const LinearAlgebra::BlockVector &stokes_adjoint_rhs,
+                                   LinearAlgebra::BlockVector &field_adjoint);
+
+        /**
+         * Apply the transpose of the advection-field dependence in the Stokes
+         * right hand side for a supplied Stokes test vector. This is the core
+         * local action used by add_stokes_field_transpose() after the Stokes
+         * adjoint solve and by the finite-difference diagnostic.
+         */
+        void
+        add_stokes_rhs_field_transpose(const AdvectionField &advection_field,
+                                       const ForwardStateView<dim> &snapshot,
+                                       const LinearAlgebra::BlockVector &stokes_test_vector,
+                                       LinearAlgebra::BlockVector &field_adjoint);
+
+        /**
+         * Run a finite-difference dot-product diagnostic for the composition
+         * dependence of the assembled Stokes right hand side.
+         */
+        void
+        run_composition_stokes_rhs_transpose_test(const ForwardStateView<dim> &snapshot);
+
+        /**
+         * Run a direct finite-difference diagnostic for the viscosity
+         * coefficient in the Stokes residual, bypassing MaterialModelAdjoint.
+         */
+        void
+        run_direct_stokes_viscosity_derivative_test(const ForwardStateView<dim> &snapshot);
+
+        /**
+         * Run a standalone dot-product diagnostic for the material-model VJP
+         * backend on the simple material model.
+         */
+        void
+        run_material_model_adjoint_vjp_test(const ForwardStateView<dim> &snapshot) const;
+
+        void
+        inject_lifecycle_failure(const Diagnostics::LifecycleFailurePoint point,
+                                 const unsigned int next_reverse_step) const;
+
+        /**
+         * Reconstruct the full, temporary replay view required by existing
+         * adjoint assembly routines. Unlike an archived record it may contain
+         * indexed BDF history and reconstructed Stokes fields, but it is held
+         * only for the current reverse operation.
+         */
+        ForwardStateView<dim>
+        reconstruct_forward_snapshot(const unsigned int record);
+
+        /** Return one state from the three-entry reverse working cache. */
+        const LinearAlgebra::BlockVector &
+        load_reconstructed_state(const unsigned int record);
+
+        /** Recover velocity and pressure from archived T,C for minimal mode. */
+        void
+        recover_stokes_state(const unsigned int record,
+                             LinearAlgebra::BlockVector &state);
+
+        /** Compare a T,C-recovered Stokes state with the cached forward one. */
+        void
+        run_trajectory_stokes_recovery_diagnostic();
+
+        /** Validate the Phase-A deterministic primal replay primitive. */
+        void
+        run_trajectory_replay_diagnostic();
+
+        /** Reject configurations that have not been audited for Phase-A replay. */
+        void
+        validate_trajectory_replay_capability() const;
+
+        /** Hydrate and replay one fixed-spacing interval into memory. */
+        void
+        materialize_forward_replay_window(const unsigned int record);
+
+        /** Compare sparse replay states with the optional dense reference. */
+        void
+        compare_sparse_replay_state(const unsigned int record,
+                                    const LinearAlgebra::BlockVector &state);
+
+        /** Apply the restart-safe cleanup policy after a committed checkpoint. */
+        void
+        cleanup_trajectory_after_checkpoint(const AdjointRestartState &state);
+
+        /** Print storage, working-set, and process-memory diagnostics. */
+        void
+        report_trajectory_statistics(const std::string &stage) const;
+
+        /**
+         * Emit a rank-local, allocation-free memory checkpoint while
+         * investigating the experimental MPI reverse path.
+         */
+        void
+        report_mpi_adjoint_memory_checkpoint(
+          const std::string &stage,
+          const LinearAlgebra::BlockVector *state = nullptr) const;
+
+        /**
+         * Mutable simulator pointer used only by the adjoint workflow for
+         * operations that cannot be expressed through SimulatorAccess, such as
+         * temporarily replacing the system right hand side or current solution
+         * before an adjoint Stokes solve. The SimulatorAccess base class is
+         * still initialized separately and remains the preferred route for
+         * ordinary read-only simulator queries.
+         */
+        Simulator<dim> *simulator;
+        Objective::Manager<dim> objective_manager;
+        Diagnostics::Manager<dim> diagnostics_manager;
+        InitialTemperatureOptimization<dim> initial_temperature_optimization;
+        TimeDependentWorkflow<dim> time_dependent_workflow;
+        std::vector<std::unique_ptr<ObjectiveResult>> objective_results;
+        std::vector<std::unique_ptr<AdjointState>> adjoint_states;
+        TrajectoryManager<dim> trajectory_manager;
+        bool suppress_evaluation_side_effects = false;
+        unsigned int stop_after_adjoint_checkpoint;
+        bool run_trajectory_stokes_recovery_check;
+        bool run_trajectory_replay_check;
+        bool run_sparse_trajectory_replay_check;
+        bool run_matrix_free_cold_rebuild_diagnostic;
+        double trajectory_stokes_recovery_tolerance;
+        double trajectory_replay_tolerance;
+        Diagnostics::LifecycleFailurePoint lifecycle_failure_injection;
+        Diagnostics::CheckpointFailurePoint checkpoint_transaction_failure_injection;
+        int checkpoint_transaction_failure_rank;
+        unsigned int checkpoint_transaction_failure_next_reverse_step;
+        Diagnostics::CleanupFailurePoint trajectory_cleanup_failure_injection;
+        int trajectory_cleanup_failure_rank;
+        unsigned int trajectory_cleanup_failure_next_reverse_step;
+        Diagnostics::AppendFailurePoint trajectory_append_failure_injection;
+        int trajectory_append_failure_rank;
+        unsigned int trajectory_append_failure_step;
+        KernelRepository<dim> kernels;
+        std::string material_model_name;
+        std::string advection_preconditioner;
+        bool run_advection_preconditioner_comparison;
+        bool run_material_model_adjoint_vjp_diagnostic;
+        double material_model_adjoint_vjp_diagnostic_epsilon;
+        bool run_composition_stokes_rhs_transpose_diagnostic;
+        double composition_stokes_rhs_transpose_diagnostic_epsilon;
+        bool run_direct_stokes_viscosity_derivative_diagnostic;
+        double direct_stokes_viscosity_derivative_diagnostic_epsilon;
+        bool run_transposed_advection_constraint_diagnostic;
+        bool run_artificial_viscosity_coefficient_seed_diagnostic;
+        double artificial_viscosity_coefficient_seed_diagnostic_epsilon;
+        bool run_artificial_viscosity_estimator_transpose_diagnostic;
+        double artificial_viscosity_estimator_transpose_diagnostic_epsilon;
+        bool run_local_entropy_residual_transpose_diagnostic;
+        double local_entropy_residual_transpose_diagnostic_epsilon;
+        bool run_global_entropy_denominator_scalar_diagnostic;
+        double global_entropy_denominator_scalar_diagnostic_epsilon;
+        bool run_global_entropy_variation_transpose_diagnostic;
+        double global_entropy_variation_transpose_diagnostic_epsilon;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/manager.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/simulator_state.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#ifndef _aspect_adjoint_core_simulator_state_h
+#define _aspect_adjoint_core_simulator_state_h
+
+#include <aspect/global.h>
+
+#include <deal.II/lac/affine_constraints.h>
+
+namespace aspect
+{
+  template <int dim>
+  class Simulator;
+
+  namespace Adjoint
+  {
+    /**
+     * An exception-safe guard for the mutable part of Simulator state used by
+     * adjoint assembly, trajectory replay, and diagnostic perturbations.
+     *
+     * A number of adjoint operations temporarily install a reconstructed
+     * forward state in Simulator because the existing ASPECT assembly code
+     * obtains its inputs from SimulatorAccess. This class makes that mutation
+     * explicit and restores the complete affected state on every exit path.
+     * Keeping the restore operation in one place also prevents a newly added
+     * Simulator field from being restored by one adjoint path but forgotten by
+     * another.
+     *
+     * The guard is deliberately non-copyable and non-movable. Its lifetime
+     * defines the interval during which temporary Simulator state may be
+     * installed.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class ScopedSimulatorState
+    {
+      public:
+        explicit ScopedSimulatorState(Simulator<dim> &simulator);
+
+        ScopedSimulatorState(const ScopedSimulatorState &) = delete;
+        ScopedSimulatorState &operator=(const ScopedSimulatorState &) = delete;
+        ScopedSimulatorState(ScopedSimulatorState &&) = delete;
+        ScopedSimulatorState &operator=(ScopedSimulatorState &&) = delete;
+
+        /** Restore the captured state. Repeated calls have no effect. */
+        void restore();
+
+        /**
+         * Keep the currently installed Simulator state when this object goes
+         * out of scope. This is only appropriate when ownership of the
+         * mutation has deliberately been transferred to the caller.
+         */
+        void release();
+
+        ~ScopedSimulatorState() noexcept;
+
+      private:
+        Simulator<dim> &simulator;
+        LinearAlgebra::BlockVector solution;
+        LinearAlgebra::BlockVector old_solution;
+        LinearAlgebra::BlockVector old_old_solution;
+        LinearAlgebra::BlockVector current_linearization_point;
+        LinearAlgebra::BlockVector system_rhs;
+        AffineConstraints<double> current_constraints;
+        double time;
+        double time_step;
+        double old_time_step;
+        double pressure_normalization_adjustment;
+        double pressure_scaling;
+        unsigned int timestep_number;
+        unsigned int nonlinear_iteration;
+        unsigned int nonlinear_solver_failures;
+        unsigned int linear_solver_failures;
+        bool rebuild_sparsity_and_matrices;
+        bool rebuild_stokes_matrix;
+        bool rebuild_stokes_preconditioner;
+        bool active;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/simulator_state.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/state.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_core_state_h
+#define _aspect_adjoint_core_state_h
+
+#include <aspect/global.h>
+
+#include <deal.II/lac/affine_constraints.h>
+
+#include <string>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * A non-owning full-system-vector reference used by a transient replay
+     * view. Existing adjoint helpers accept block vectors by const reference,
+     * so this conversion preserves those interfaces without making another
+     * deep copy of q_n, q_(n-1), or q_(n-2).
+     */
+    struct TrajectoryVectorReference
+    {
+        explicit TrajectoryVectorReference(const LinearAlgebra::BlockVector &reference)
+          : vector(&reference)
+        {}
+
+        operator const LinearAlgebra::BlockVector &() const
+        {
+          return get();
+        }
+
+        const LinearAlgebra::BlockVector &
+        get() const
+        {
+          Assert(vector != nullptr, ExcInternalError());
+          return *vector;
+        }
+
+      private:
+        const LinearAlgebra::BlockVector *vector;
+    };
+
+    /**
+     * A data structure that stores the value and right hand side contribution
+     * of one objective before the adjoint linear solve.
+     *
+     * @ingroup Adjoint
+     */
+    struct ObjectiveResult
+    {
+      /**
+       * Objective functional name used in output and repositories.
+       */
+      std::string objective_name;
+
+      /**
+       * Scalar objective value.
+       */
+      double value = 0.0;
+
+      /**
+       * Adjoint right hand side contribution associated with this objective.
+       */
+      LinearAlgebra::BlockVector right_hand_side;
+    };
+
+    /**
+     * A temporary reconstructed view of one accepted forward time step used
+     * by the time-dependent adjoint workflow.
+     *
+     * The reverse sweep replays, in reverse order, the linearized algebra
+     * that was assembled during the forward run. ASPECT's assembly routines
+     * read most state through the mutable Simulator object, so the reverse
+     * code temporarily materializes full-system vectors here before applying
+     * a transpose action. This object is never the persistent trajectory
+     * format: TrajectoryStore contains only unique physical fields,
+     * and this view obtains BDF history by record index.
+     *
+     * The temporal meaning of the vectors is the usual ASPECT convention for
+     * an accepted time step n:
+     *
+     * - solution is the converged state q_n.
+     * - old_solution is q_{n-1}, i.e. the state used in BDF history terms.
+     * - old_old_solution is q_{n-2}; it is only active for BDF2 steps.
+     * - advection_linearization_point is reconstructed from q_{n-1}.
+     * - stokes_linearization_point is reconstructed from q_n under the v1
+     *   T,C-dependent Picard Stokes restrictions.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class ForwardStateView
+    {
+      public:
+        /**
+         * Construct a complete non-owning view of one reconstructed forward
+         * state. All vector references must outlive this object.
+         */
+        ForwardStateView(const LinearAlgebra::BlockVector &solution,
+                         const LinearAlgebra::BlockVector &old_solution,
+                         const LinearAlgebra::BlockVector &old_old_solution,
+                         const LinearAlgebra::BlockVector &advection_linearization_point,
+                         const LinearAlgebra::BlockVector &stokes_linearization_point,
+                         const double time,
+                         const double time_step,
+                         const double old_time_step,
+                         const unsigned int timestep_number)
+          :
+          solution(solution),
+          old_solution(old_solution),
+          old_old_solution(old_old_solution),
+          advection_linearization_point(advection_linearization_point),
+          stokes_linearization_point(stokes_linearization_point),
+          time(time),
+          time_step(time_step),
+          old_time_step(old_time_step),
+          timestep_number(timestep_number)
+        {}
+
+        TrajectoryVectorReference solution;
+        TrajectoryVectorReference old_solution;
+        TrajectoryVectorReference old_old_solution;
+        TrajectoryVectorReference advection_linearization_point;
+        TrajectoryVectorReference stokes_linearization_point;
+
+        /**
+         * The constraints reconstructed from the fixed mesh, recorded time,
+         * and configured boundary managers. This copy exists only while the
+         * transient view is used to build homogeneous adjoint constraints; it
+         * is never written to the trajectory archive.
+         */
+        AffineConstraints<double> constraints;
+
+        double time = 0.0;
+        double time_step = 0.0;
+        double old_time_step = 0.0;
+        double pressure_normalization_adjustment = 0.0;
+        unsigned int timestep_number = numbers::invalid_unsigned_int;
+    };
+
+    /**
+     * A data structure that stores the adjoint solution associated with a
+     * single objective.
+     *
+     * @ingroup Adjoint
+     */
+    struct AdjointState
+    {
+      /**
+       * Objective functional name associated with this adjoint solution.
+       */
+      std::string objective_name;
+
+      /**
+       * Solution of the adjoint Stokes system.
+       */
+      LinearAlgebra::BlockVector solution;
+    };
+
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/state.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/core/types.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_core_types_h
+#define _aspect_adjoint_core_types_h
+
+#include <aspect/global.h>
+
+#include <string>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * An enum whose members identify physical material properties for which
+     * adjoint kernels can currently be accumulated.
+     *
+     * @ingroup Adjoint
+     */
+    enum class PhysicalProperty
+    {
+      /**
+       * Density.
+       */
+      density,
+
+      /**
+       * Viscosity.
+       */
+      viscosity
+    };
+
+    /**
+     * Return the parameter-file name of a physical property.
+     *
+     * @param property The physical property.
+     *
+     * @return The name of @p property.
+     *
+     * @ingroup Adjoint
+     */
+    inline std::string
+    property_name(const PhysicalProperty property)
+    {
+      switch (property)
+        {
+          case PhysicalProperty::density:
+            return "density";
+          case PhysicalProperty::viscosity:
+            return "viscosity";
+          default:
+            AssertThrow(false, ExcMessage("Unknown adjoint physical property."));
+            return "unknown";
+        }
+    }
+
+    /**
+     * A key that identifies one adjoint kernel contribution by objective,
+     * physics term, and physical property.
+     *
+     * @ingroup Adjoint
+     */
+    struct KernelContributionKey
+    {
+      /**
+       * Objective functional name associated with the contribution.
+       */
+      std::string objective_name;
+
+      /**
+       * Name of the physics term associated with the contribution.
+       */
+      std::string physics_term_name;
+
+      /**
+       * Physical property associated with the contribution.
+       */
+      PhysicalProperty property;
+
+      /**
+       * Compare contribution keys for use in associative containers.
+       *
+       * @param other The key to compare against.
+       *
+       * @return true if this key should be ordered before @p other.
+       */
+      bool
+      operator<(const KernelContributionKey &other) const
+      {
+        if (objective_name != other.objective_name)
+          return objective_name < other.objective_name;
+
+        if (physics_term_name != other.physics_term_name)
+          return physics_term_name < other.physics_term_name;
+
+        return static_cast<unsigned int>(property) < static_cast<unsigned int>(other.property);
+      }
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/core/types.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/core/failure_injection.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#include <aspect/adjoint/core/failure_injection.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace Diagnostics
+    {
+      LifecycleFailurePoint
+      parse_lifecycle_failure_point(const std::string &name)
+      {
+        if (name == "none")
+          return LifecycleFailurePoint::none;
+        if (name == "before checkpoint commit")
+          return LifecycleFailurePoint::before_checkpoint_commit;
+        if (name == "after checkpoint commit before cleanup")
+          return LifecycleFailurePoint::after_checkpoint_commit_before_cleanup;
+        if (name == "during cleanup")
+          return LifecycleFailurePoint::during_cleanup;
+        if (name == "after cleanup")
+          return LifecycleFailurePoint::after_cleanup;
+        AssertThrow(false, ExcMessage("Unknown adjoint lifecycle failure point: " + name));
+        return LifecycleFailurePoint::none;
+      }
+
+
+
+      CheckpointFailurePoint
+      parse_checkpoint_failure_point(const std::string &name)
+      {
+        if (name == "none")
+          return CheckpointFailurePoint::none;
+        if (name == "after temporary checkpoint directory creation")
+          return CheckpointFailurePoint::after_temporary_directory_creation;
+        if (name == "after rank-local checkpoint payload writing")
+          return CheckpointFailurePoint::after_rank_payload_write;
+        if (name == "after all payloads before metadata publication")
+          return CheckpointFailurePoint::before_metadata_publication;
+        if (name == "after checkpoint metadata publication")
+          return CheckpointFailurePoint::after_metadata_publication;
+        if (name == "after committed checkpoint directory before latest publication")
+          return CheckpointFailurePoint::before_latest_publication;
+        if (name == "after latest publication")
+          return CheckpointFailurePoint::after_latest_publication;
+        AssertThrow(false, ExcMessage("Unknown adjoint checkpoint failure point: " + name));
+        return CheckpointFailurePoint::none;
+      }
+
+
+
+      CleanupFailurePoint
+      parse_cleanup_failure_point(const std::string &name)
+      {
+        if (name == "none")
+          return CleanupFailurePoint::none;
+        if (name == "before cleanup starts")
+          return CleanupFailurePoint::before_cleanup;
+        if (name == "after rank-local cleanup payload deletion")
+          return CleanupFailurePoint::after_rank_payload_deletion;
+        if (name == "before cleanup collective success")
+          return CleanupFailurePoint::before_collective_success;
+        if (name == "after rank-local cleanup success before manifest update")
+          return CleanupFailurePoint::before_manifest_update;
+        if (name == "after physical segment deletion before manifest update")
+          return CleanupFailurePoint::after_segment_deletion;
+        if (name == "after cleanup manifest update")
+          return CleanupFailurePoint::after_manifest_update;
+        AssertThrow(false, ExcMessage("Unknown adjoint cleanup failure point: " + name));
+        return CleanupFailurePoint::none;
+      }
+
+
+
+      AppendFailurePoint
+      parse_append_failure_point(const std::string &name)
+      {
+        if (name == "none")
+          return AppendFailurePoint::none;
+        if (name == "after local serialization before shared-file write")
+          return AppendFailurePoint::after_local_serialization;
+        if (name == "after collective payload write before manifest")
+          return AppendFailurePoint::after_collective_payload_write;
+        if (name == "after payload write before manifest")
+          return AppendFailurePoint::after_payload_write;
+        if (name == "after manifest publication")
+          return AppendFailurePoint::after_manifest_publication;
+        AssertThrow(false, ExcMessage("Unknown adjoint append failure point: " + name));
+        return AppendFailurePoint::none;
+      }
+
+
+
+      std::string
+      to_string(const LifecycleFailurePoint point)
+      {
+        switch (point)
+          {
+            case LifecycleFailurePoint::none:
+              return "none";
+            case LifecycleFailurePoint::before_checkpoint_commit:
+              return "before checkpoint commit";
+            case LifecycleFailurePoint::after_checkpoint_commit_before_cleanup:
+              return "after checkpoint commit before cleanup";
+            case LifecycleFailurePoint::during_cleanup:
+              return "during cleanup";
+            case LifecycleFailurePoint::after_cleanup:
+              return "after cleanup";
+          }
+
+        Assert(false, ExcInternalError());
+        return "none";
+      }
+    }
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/core/failure_injection.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/core/instantaneous_stokes_workflow.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#include <aspect/adjoint/core/instantaneous_stokes_workflow.h>
+#include <aspect/adjoint/operators/stokes_adjoint_solver.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/simulator.h>
+
+#include <deal.II/base/table_handler.h>
+
+#include <algorithm>
+#include <iterator>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    InstantaneousStokesWorkflow<dim>::InstantaneousStokesWorkflow(
+      Simulator<dim> &simulator_object,
+      Objective::Manager<dim> &objectives)
+      :
+      simulator(simulator_object),
+      objective_manager(objectives)
+    {
+      this->initialize_simulator(simulator_object);
+    }
+
+
+
+    template <int dim>
+    void
+    InstantaneousStokesWorkflow<dim>::validate_setup() const
+    {
+      using MassConservation =
+        typename Parameters<dim>::Formulation::MassConservation;
+      const std::vector<std::string> &objective_names =
+        objective_manager.get_active_plugin_names();
+      const bool uses_dynamic_topography =
+        std::find(objective_names.begin(), objective_names.end(),
+                  "dynamic topography") != objective_names.end();
+
+      if (uses_dynamic_topography)
+        AssertThrow(
+          this->get_postprocess_manager().template has_matching_active_plugin<
+          Postprocess::DynamicTopography<dim>>(),
+          ExcMessage("The dynamic topography adjoint objective requires the "
+                     "dynamic topography postprocessor."));
+
+      AssertThrow(this->get_parameters().formulation_mass_conservation
+                  == MassConservation::incompressible,
+                  ExcMessage("The instantaneous Stokes adjoint currently supports "
+                             "only incompressible mass conservation."));
+      AssertThrow(!this->get_material_model().is_compressible(),
+                  ExcMessage("The instantaneous Stokes adjoint currently supports "
+                             "only incompressible material models."));
+    }
+
+
+
+    template <int dim>
+    void
+    InstantaneousStokesWorkflow<dim>::prepare_required_forward_postprocessors()
+    {
+      // Objectives declare data dependencies rather than invoking
+      // postprocessors themselves. Execute the union once so dynamic
+      // topography, boundary density, and geoid caches all correspond to the
+      // same freshly accepted Stokes solution.
+      const std::set<std::string> required =
+        objective_manager.required_forward_postprocessors();
+      if (required.empty())
+        return;
+
+      TableHandler temporary_statistics;
+      simulator.postprocess_manager.execute_selected_postprocessors(required,
+                                                                    temporary_statistics);
+    }
+
+
+
+    template <int dim>
+    void
+    InstantaneousStokesWorkflow<dim>::run(
+      std::vector<std::unique_ptr<ObjectiveResult>> &objective_results,
+      std::vector<std::unique_ptr<AdjointState>> &adjoint_states,
+      KernelRepository<dim> &kernels)
+    {
+      validate_setup();
+
+      // The steady computation graph is
+      //
+      //   parameters -> Stokes state -> required postprocessors -> J,
+      //
+      // and its reverse is
+      //
+      //   J -> objective RHS -> Stokes transpose -> volume kernels,
+      //                         \-> direct postprocessor kernels.
+      //
+      // Every derivative below is evaluated at this newly assembled forward
+      // Stokes state. Required postprocessors run before objective evaluation
+      // so their cached boundary fields refer to the same state.
+      simulator.assemble_and_solve_stokes();
+      prepare_required_forward_postprocessors();
+      objective_results = objective_manager.evaluate_and_assemble_right_hand_sides();
+      AssertThrow(!objective_results.empty(),
+                  ExcMessage("No instantaneous adjoint objective is active."));
+
+      adjoint_states.clear();
+      const auto &objectives = objective_manager.get_active_plugins();
+      const auto &objective_names = objective_manager.get_active_plugin_names();
+      AssertThrow(objectives.size() == objective_names.size(), ExcInternalError());
+      StokesAdjointSolver<dim> stokes_solver(simulator);
+
+      for (const auto &objective_result : objective_results)
+        {
+          // Match the result to the capability-bearing plugin by its stable
+          // registered name. Each objective owns a distinct RHS and adjoint
+          // state so kernels remain attributable when several functionals are
+          // active in one run.
+          const auto name = std::find(objective_names.begin(),
+                                      objective_names.end(),
+                                      objective_result->objective_name);
+          AssertThrow(name != objective_names.end(), ExcInternalError());
+          const auto objective = std::next(objectives.begin(),
+                                           std::distance(objective_names.begin(), name));
+          const auto *instantaneous =
+            dynamic_cast<const Objective::InstantaneousInterface<dim> *>(
+              objective->get());
+          AssertThrow(instantaneous != nullptr, ExcInternalError());
+
+          auto adjoint_state = std::make_unique<AdjointState>();
+          adjoint_state->objective_name = objective_result->objective_name;
+          if (instantaneous->requires_physical_stokes_adjoint())
+            stokes_solver.solve(objective_result->right_hand_side, adjoint_state->solution);
+          else
+            {
+              // A purely explicit functional still participates in the same
+              // result/kernel pipeline. Its implicit-state derivative is
+              // exactly zero, represented by a correctly partitioned vector;
+              // direct kernels are added after the loop.
+              adjoint_state->solution.reinit(
+                this->introspection().index_sets.system_partitioning,
+                this->get_mpi_communicator());
+              adjoint_state->solution = 0.0;
+            }
+          adjoint_states.push_back(std::move(adjoint_state));
+        }
+
+      KernelCalculator<dim> kernel_calculator(simulator);
+      // KernelCalculator contracts the physical adjoint with derivatives of
+      // the Stokes residual. Objective-specific explicit paths (for example
+      // density in a harmonic observation or CBF denominator) are additive
+      // and are appended by the objective manager afterward.
+      kernels = kernel_calculator.calculate(objective_results, adjoint_states);
+      objective_manager.add_direct_kernel_contributions(kernels);
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template class Adjoint::InstantaneousStokesWorkflow<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/core/instantaneous_stokes_workflow.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/core/kernel_calculator.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/simulator.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <limits>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    void
+    KernelRepository<dim>::add_contribution(const KernelContributionKey &key,
+                                            const Vector<double> &values)
+    {
+      // Contributions are intentionally not summed on insertion. The full
+      // key preserves objective, physical path, and differentiated property,
+      // which makes double-counting visible and lets output combine terms
+      // explicitly only after their provenance has been recorded.
+      AssertThrow(contribution_map.find(key) == contribution_map.end(),
+                  ExcMessage("Duplicate adjoint kernel contribution for objective <"
+                             + key.objective_name + ">, physics term <"
+                             + key.physics_term_name + ">, and physical property <"
+                             + property_name(key.property) + ">."));
+      contribution_map[key] = values;
+    }
+
+
+
+    template <int dim>
+    void
+    KernelRepository<dim>::set_cell_volumes(const Vector<double> &values)
+    {
+      cell_volume_values = values;
+    }
+
+
+
+    template <int dim>
+    const Vector<double> &
+    KernelRepository<dim>::cell_volumes() const
+    {
+      return cell_volume_values;
+    }
+
+
+
+    template <int dim>
+    bool
+    KernelRepository<dim>::empty() const
+    {
+      return contribution_map.empty();
+    }
+
+
+
+    template <int dim>
+    unsigned int
+    KernelRepository<dim>::n_contributions() const
+    {
+      return contribution_map.size();
+    }
+
+
+
+    template <int dim>
+    const std::map<KernelContributionKey, Vector<double>> &
+    KernelRepository<dim>::contributions() const
+    {
+      return contribution_map;
+    }
+
+
+
+    template <int dim>
+    KernelCalculator<dim>::KernelCalculator(const Simulator<dim> &simulator)
+    {
+      this->initialize_simulator(simulator);
+    }
+
+
+
+    template <int dim>
+    KernelRepository<dim>
+    KernelCalculator<dim>::calculate(
+      const std::vector<std::unique_ptr<ObjectiveResult>> &objective_results,
+      const std::vector<std::unique_ptr<AdjointState>> &adjoint_states) const
+    {
+      AssertThrow(objective_results.size() == adjoint_states.size(),
+                  ExcMessage("The number of objective results must match the number of adjoint states."));
+
+      KernelRepository<dim> kernels;
+
+      const unsigned int n_active_cells = this->get_triangulation().n_active_cells();
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(this->introspection().base_elements.velocities).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_gradients |
+                              update_quadrature_points |
+                              update_JxW_values);
+
+      // For incompressible Stokes, write the weak residual schematically as
+      //
+      //   R(v)=integral [2 eta eps(u):eps(v)-rho g.v-p div(v)] dx.
+      //
+      // If z solves (dR/d[u,p])^T z=bar(J), then the property gradients from
+      // the implicit state path are
+      //
+      //   dJ/d(rho) = -g.z,
+      //   dJ/d(eta) = 2 eps(u):eps(z).
+      //
+      // Kernels are kept separate for each objective so users can inspect or
+      // combine objective contributions explicitly after output.
+      for (unsigned int objective_index = 0; objective_index < objective_results.size(); ++objective_index)
+        {
+          const std::string &objective_name = objective_results[objective_index]->objective_name;
+          const LinearAlgebra::BlockVector &adjoint_solution = adjoint_states[objective_index]->solution;
+
+          Vector<double> cell_volumes(n_active_cells);
+          Vector<double> density_volume(n_active_cells);
+          Vector<double> viscosity_volume(n_active_cells);
+
+          for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+            if (cell->is_locally_owned())
+              {
+                fe_values.reinit(cell);
+
+                // MaterialModelInputs is used here only as a convenient FE
+                // evaluator for the adjoint velocity z at quadrature points;
+                // no material model is evaluated on this synthetic state.
+                MaterialModel::MaterialModelInputs<dim> adjoint_in(fe_values,
+                                                                   cell,
+                                                                   this->introspection(),
+                                                                   adjoint_solution);
+
+                std::vector<double> local_forward_values(this->get_fe().dofs_per_cell);
+                std::vector<double> local_adjoint_values(this->get_fe().dofs_per_cell);
+                cell->get_dof_values(this->get_solution(),
+                                     local_forward_values.begin(),
+                                     local_forward_values.end());
+                cell->get_dof_values(adjoint_solution,
+                                     local_adjoint_values.begin(),
+                                     local_adjoint_values.end());
+
+                const unsigned int cell_index = cell->active_cell_index();
+                for (unsigned int q = 0; q < quadrature_formula.size(); ++q)
+                  {
+                    const Tensor<1,dim> gravity =
+                      this->get_gravity_model().gravity_vector(fe_values.quadrature_point(q));
+                    const double JxW = fe_values.JxW(q);
+                    SymmetricTensor<2, dim> forward_operator_strain;
+                    SymmetricTensor<2, dim> adjoint_operator_strain;
+
+                    // Reconstruct eps(u_h) and eps(z_h) from local DoF values.
+                    // Restricting to Stokes components excludes temperature
+                    // and composition basis functions in the mixed element.
+                    for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+                      if (this->introspection().is_stokes_component(this->get_fe().system_to_component_index(i).first))
+                        {
+                          const SymmetricTensor<2, dim> epsilon_phi_u =
+                            fe_values[this->introspection().extractors.velocities].symmetric_gradient(i, q);
+
+                          forward_operator_strain += local_forward_values[i] * epsilon_phi_u;
+                          adjoint_operator_strain += local_adjoint_values[i] * epsilon_phi_u;
+                        }
+
+                    // Accumulate the two contractions above as cell integrals.
+                    // The negative density sign follows the buoyancy residual
+                    // -rho g.v; the adjoint velocity is the test function v=z.
+                    cell_volumes(cell_index) += JxW;
+                    density_volume(cell_index) += -(gravity * adjoint_in.velocity[q]) * JxW;
+                    // Physical-property viscosity controls are additive
+                    // viscosity increments. The incompressible Stokes
+                    // assembler uses the full symmetric gradient term
+                    // 2 eta eps(u):eps(v), so the derivative is with respect
+                    // to eta itself and does not include an extra eta factor
+                    // or a deviatoric projection.
+                    viscosity_volume(cell_index) +=
+                      (2.0 * (forward_operator_strain * adjoint_operator_strain))
+                      * JxW;
+
+                  }
+
+              }
+
+          // Store cell averages K_K=|K|^-1 integral_K K(x) dx. This choice
+          // gives a mesh-independent piecewise-constant field while the output
+          // postprocessor multiplies by |K| again when reporting integrated
+          // parameter contributions.
+          for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+            if (cell->is_locally_owned())
+              {
+                const unsigned int cell_index = cell->active_cell_index();
+                AssertThrow(cell_volumes(cell_index) > std::numeric_limits<double>::min(),
+                            ExcMessage("KernelCalculator encountered a locally owned cell with zero volume."));
+
+                density_volume(cell_index) /= cell_volumes(cell_index);
+                viscosity_volume(cell_index) /= cell_volumes(cell_index);
+              }
+
+
+          if (objective_index == 0)
+            kernels.set_cell_volumes(cell_volumes);
+
+          kernels.add_contribution({objective_name,
+                                    "incompressible Stokes volume",
+                                    PhysicalProperty::density
+                                   },
+                                   density_volume);
+          kernels.add_contribution({objective_name,
+                                    "incompressible Stokes volume",
+                                    PhysicalProperty::viscosity
+                                   },
+                                   viscosity_volume);
+        }
+
+      return kernels;
+    }
+
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template class Adjoint::KernelRepository<dim>; \
+  template class Adjoint::KernelCalculator<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/core/kernel_calculator.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/core/manager.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/core/manager.h>
+#include <aspect/adjoint/core/instantaneous_stokes_workflow.h>
+#include <aspect/adjoint/core/simulator_state.h>
+#include <aspect/adjoint/operators/stokes_adjoint_solver.h>
+#include <aspect/adjoint/objective/temperature_field_objective.h>
+
+#include <aspect/geometry_model/box.h>
+#include <aspect/gravity_model/vertical.h>
+#include <aspect/material_model/simple.h>
+#include <aspect/adjoint/operators/advection_adjoint_calculator.h>
+#include <aspect/adjoint/operators/boundary_conditions.h>
+#include <aspect/adjoint/operators/material_model_adjoint.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/simulator.h>
+#include <aspect/simulator/solver/stokes_matrix_free.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/base/table_handler.h>
+#include <deal.II/base/utilities.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <set>
+#include <string>
+
+#if defined(__APPLE__)
+#  include <mach/mach.h>
+#endif
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    Manager<dim>::Manager()
+      :
+      simulator(nullptr),
+      stop_after_adjoint_checkpoint(numbers::invalid_unsigned_int),
+      run_trajectory_stokes_recovery_check(false),
+      run_trajectory_replay_check(false),
+      run_sparse_trajectory_replay_check(false),
+      run_matrix_free_cold_rebuild_diagnostic(false),
+      trajectory_stokes_recovery_tolerance(1e-8),
+      trajectory_replay_tolerance(1e-11),
+      lifecycle_failure_injection(Diagnostics::LifecycleFailurePoint::none),
+      checkpoint_transaction_failure_injection(Diagnostics::CheckpointFailurePoint::none),
+      checkpoint_transaction_failure_rank(-1),
+      checkpoint_transaction_failure_next_reverse_step(numbers::invalid_unsigned_int),
+      trajectory_cleanup_failure_injection(Diagnostics::CleanupFailurePoint::none),
+      trajectory_cleanup_failure_rank(-1),
+      trajectory_cleanup_failure_next_reverse_step(numbers::invalid_unsigned_int),
+      trajectory_append_failure_injection(Diagnostics::AppendFailurePoint::none),
+      trajectory_append_failure_rank(-1),
+      trajectory_append_failure_step(numbers::invalid_unsigned_int),
+      material_model_name(""),
+      advection_preconditioner("transpose ilu"),
+      run_advection_preconditioner_comparison(false),
+      run_material_model_adjoint_vjp_diagnostic(false),
+      material_model_adjoint_vjp_diagnostic_epsilon(1e-7),
+      run_composition_stokes_rhs_transpose_diagnostic(false),
+      composition_stokes_rhs_transpose_diagnostic_epsilon(1e-7),
+      run_direct_stokes_viscosity_derivative_diagnostic(false),
+      direct_stokes_viscosity_derivative_diagnostic_epsilon(1e-7),
+      run_transposed_advection_constraint_diagnostic(false),
+      run_artificial_viscosity_coefficient_seed_diagnostic(false),
+      artificial_viscosity_coefficient_seed_diagnostic_epsilon(1e-7),
+      run_artificial_viscosity_estimator_transpose_diagnostic(false),
+      artificial_viscosity_estimator_transpose_diagnostic_epsilon(1e-7),
+      run_local_entropy_residual_transpose_diagnostic(false),
+      local_entropy_residual_transpose_diagnostic_epsilon(1e-7),
+      run_global_entropy_denominator_scalar_diagnostic(false),
+      global_entropy_denominator_scalar_diagnostic_epsilon(1e-7),
+      run_global_entropy_variation_transpose_diagnostic(false),
+      global_entropy_variation_transpose_diagnostic_epsilon(1e-7)
+    {}
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::declare_parameters (ParameterHandler &prm)
+    {
+      // Keep capability-owned parameter declarations outside the facade. The
+      // objective registry and optimization driver define their own public
+      // interfaces; this file declares only cross-workflow trajectory and
+      // diagnostic controls that the top-level manager dispatches.
+      Objective::Manager<dim>::declare_parameters (prm);
+      InitialTemperatureOptimization<dim>::declare_parameters(prm);
+
+      prm.enter_subsection("Adjoint");
+      {
+        prm.enter_subsection("Time dependent");
+        {
+          // Storage mode changes only which accepted fields are persisted.
+          // Both modes retain the same dense logical time schedule, and both
+          // reconstruct the same ForwardStateView consumed by the reverse
+          // operators.
+          prm.declare_entry("Trajectory storage mode", "minimal",
+                            Patterns::Selection("minimal|stokes cached"),
+                            "Storage policy for the time-dependent adjoint "
+                            "trajectory. 'minimal' archives only temperature "
+                            "and composition and recovers Stokes fields during "
+                            "the reverse sweep. 'stokes cached' additionally "
+                            "archives velocity and pressure. This is not the "
+                            "ASPECT restart-checkpoint mechanism.");
+        }
+        prm.leave_subsection();
+        prm.enter_subsection("Time dependent");
+        {
+          prm.declare_entry("Trajectory cleanup policy", "safe incremental",
+                            Patterns::Selection("safe incremental|on success|keep"),
+                            "Lifetime policy for the temporary time-dependent "
+                            "adjoint trajectory. 'safe incremental' writes and "
+                            "commits an independent reverse checkpoint before "
+                            "reclaiming obsolete records. 'on success' retains "
+                            "all temporary data until a successful reverse "
+                            "sweep. 'keep' never removes it automatically.");
+          prm.declare_entry("Trajectory records per segment", "4",
+                            Patterns::Integer(1),
+                            "Number of logical trajectory records in each shared "
+                            "MPI-I/O data file. This archive-layout setting must "
+                            "match when reopening an adjoint trajectory.");
+          prm.declare_entry("Trajectory anchor spacing", "1",
+                            Patterns::Integer(1),
+                            "Fixed Phase-B sparse replay anchor spacing. A value of 1 "
+                            "retains the dense full-archive behavior; larger values retain "
+                            "only three-level anchor packages while preserving the dense "
+                            "accepted-step schedule journal.");
+        }
+        prm.leave_subsection();
+        prm.enter_subsection("Diagnostics");
+        {
+          // Diagnostics are deliberately parameter-separated from production
+          // trajectory policy. Enabling one may add reference storage or
+          // comparisons, but must not change the selected forward/reverse
+          // discretization.
+          prm.declare_entry("Run trajectory replay diagnostic", "false",
+                            Patterns::Bool(),
+                            "Phase-A validation hook: replay the committed full "
+                            "trajectory with its recorded accepted-step schedule "
+                            "and compare every produced state with the archived "
+                            "reference. This does not enable sparse anchors or "
+                            "change the reverse sweep.");
+          prm.declare_entry("Trajectory replay tolerance", "1e-11",
+                            Patterns::Double(0.0),
+                            "Maximum relative state, velocity, and gauge-normalized "
+                            "pressure difference accepted by the Phase-A full-archive "
+                            "trajectory replay diagnostic.");
+          prm.declare_entry("Run sparse trajectory replay validation", "false",
+                            Patterns::Bool(),
+                            "Retain a separate dense full-trajectory reference archive and "
+                            "compare sparse interval replay states against it. This reference "
+                            "is diagnostic-only and is not used to satisfy reverse dependencies.");
+        }
+        prm.leave_subsection();
+        prm.enter_subsection("Time dependent");
+        {
+          prm.declare_entry("Adjoint checkpoint interval", "50",
+                            Patterns::Integer(1),
+                            "Number of completed reverse steps between durable "
+                            "adjoint restart checkpoints. This is independent "
+                            "of ASPECT's forward checkpoint interval.");
+        }
+        prm.leave_subsection();
+        prm.enter_subsection("Diagnostics");
+        {
+          prm.declare_entry("Stop after adjoint checkpoint", "-1",
+                            Patterns::Integer(-1),
+                            "Testing hook: after committing a checkpoint whose "
+                            "next reverse step equals this value, terminate "
+                            "deliberately. A negative value disables the hook.");
+          prm.declare_entry("Lifecycle failure injection", "none",
+                            Patterns::Selection("none|before checkpoint commit|"
+                                                "after checkpoint commit before cleanup|"
+                                                "during cleanup|after cleanup"),
+                            "R0 test hook that deliberately interrupts the reverse "
+                            "lifecycle at a transaction boundary. Do not enable "
+                            "this in a production run.");
+          prm.declare_entry("Checkpoint transaction failure injection", "none",
+                            Patterns::Selection(
+                              "none|after temporary checkpoint directory creation|"
+                              "after rank-local checkpoint payload writing|"
+                              "after all payloads before metadata publication|"
+                              "after checkpoint metadata publication|"
+                              "after committed checkpoint directory before latest publication|"
+                              "after latest publication"),
+                            "Benchmark-only MPI checkpoint transaction failure "
+                            "point. The selected rank reports a controlled "
+                            "failure at this collective boundary; all ranks then "
+                            "exit through the same quiet path.");
+          prm.declare_entry("Checkpoint transaction failure rank", "-1",
+                            Patterns::Integer(-1),
+                            "MPI rank used for the benchmark-only checkpoint "
+                            "failure injection. -1 selects rank zero.");
+          prm.declare_entry("Checkpoint transaction failure next reverse step", "-1",
+                            Patterns::Integer(-1),
+                            "Reverse checkpoint frontier at which to inject the "
+                            "benchmark-only transaction failure. A negative value "
+                            "disables the injection.");
+          prm.declare_entry("Trajectory cleanup failure injection", "none",
+                            Patterns::Selection(
+                              "none|before cleanup starts|"
+                              "after rank-local cleanup payload deletion|"
+                              "before cleanup collective success|"
+                              "after rank-local cleanup success before manifest update|"
+                              "after physical segment deletion before manifest update|"
+                              "after cleanup manifest update"),
+                            "Benchmark-only MPI cleanup transaction failure point. "
+                            "The selected rank reports a controlled failure and "
+                            "all ranks stop together. Sparse cleanup can safely "
+                            "repeat an interrupted pre-manifest segment deletion "
+                            "from its durable checkpoint frontier.");
+          prm.declare_entry("Trajectory cleanup failure rank", "-1",
+                            Patterns::Integer(-1),
+                            "MPI rank used for the benchmark-only cleanup failure "
+                            "injection. -1 selects rank zero.");
+          prm.declare_entry("Trajectory cleanup failure next reverse step", "-1",
+                            Patterns::Integer(-1),
+                            "Checkpoint frontier at which to inject the benchmark-only "
+                            "cleanup failure. A negative value disables injection.");
+          prm.declare_entry("Trajectory append failure injection", "none",
+                            Patterns::Selection(
+                              "none|after local serialization before shared-file write|"
+                              "after collective payload write before manifest|"
+                              "after payload write before manifest|after manifest publication"),
+                            "Benchmark-only shared trajectory append transaction "
+                            "failure point. All ranks stop through QuietException; "
+                            "do not enable in production.");
+          prm.declare_entry("Trajectory append failure rank", "-1",
+                            Patterns::Integer(-1),
+                            "MPI rank used for the benchmark-only trajectory append "
+                            "failure injection. -1 selects rank zero.");
+          prm.declare_entry("Trajectory append failure step", "-1",
+                            Patterns::Integer(-1),
+                            "Forward trajectory record at which to inject the "
+                            "benchmark-only append failure. A negative value disables it.");
+          prm.declare_entry("Run trajectory Stokes recovery diagnostic", "false",
+                            Patterns::Bool(),
+                            "For stokes cached trajectories, recover Stokes "
+                            "fields from archived temperature and composition "
+                            "at representative accepted steps and compare them "
+                            "with the archived forward velocity and pressure. "
+                            "This validates the minimal-mode reconstruction "
+                            "path without changing the adjoint equations.");
+          prm.declare_entry("Run matrix-free cold rebuild diagnostic", "false",
+                            Patterns::Bool(),
+                            "Immediately before the first reverse Stokes solve, "
+                            "discard the matrix-free/GMG runtime state and let "
+                            "the ordinary adjoint-restart reconstruction path "
+                            "rebuild it. This is a targeted A/B diagnostic and "
+                            "does not alter adjoint algebra or checkpoint data.");
+          prm.declare_entry("Output MPI adjoint memory diagnostics", "false",
+                            Patterns::Bool(),
+                            "Emit a rank-local RSS and distributed-vector checkpoint "
+                            "around replay reconstruction and the first reverse "
+                            "Stokes setup. This is an allocation-free diagnostic for "
+                            "the experimental MPI reverse path.");
+          prm.declare_entry("Trajectory Stokes recovery tolerance", "1e-8",
+                            Patterns::Double(0.0),
+                            "Maximum permitted relative velocity and "
+                            "pressure error in the trajectory Stokes recovery "
+                            "diagnostic after pressure-gauge normalization.");
+        }
+        prm.leave_subsection();
+        prm.enter_subsection("Time dependent");
+        {
+          prm.declare_entry("Advection preconditioner", "transpose ilu",
+                            Patterns::Selection("none|forward ilu experimental|transpose ilu"),
+                            "Preconditioner for the time-dependent transposed "
+                            "advection solve. This affects only Krylov "
+                            "convergence, not the discrete adjoint equation. "
+                            "The default rebuilds ILU from an explicit A^T "
+                            "matrix for every restored snapshot.");
+        }
+        prm.leave_subsection();
+        prm.enter_subsection("Diagnostics");
+        {
+          prm.declare_entry("Run advection preconditioner comparison", "false",
+                            Patterns::Bool(),
+                            "For the first temperature and composition transpose "
+                            "solves, compare unpreconditioned GMRES with "
+                            "ILU(A^T) using the same restored matrix and "
+                            "right hand side. This diagnostic does not alter "
+                            "the production adjoint solve.");
+          prm.declare_entry("Run material model adjoint VJP test", "false",
+                            Patterns::Bool(),
+                            "Run a standalone finite-difference dot-product "
+                            "diagnostic for the MaterialModelAdjoint VJP backend. "
+                            "This v1 diagnostic is restricted to the simple "
+                            "material model.");
+          prm.declare_entry("Material model adjoint VJP test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the standalone "
+                            "MaterialModelAdjoint VJP diagnostic.");
+          prm.declare_entry("Run C to Stokes RHS transpose test", "false",
+                            Patterns::Bool(),
+                            "Run a finite-difference dot-product diagnostic for "
+                            "the composition dependence of the assembled Stokes "
+                            "right hand side. This is intended for small "
+                            "adjoint benchmarks only.");
+          prm.declare_entry("C to Stokes RHS transpose test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the C to Stokes "
+                            "RHS transpose diagnostic.");
+          prm.declare_entry("Run direct Stokes viscosity derivative test", "false",
+                            Patterns::Bool(),
+                            "Run a direct finite-difference dot-product diagnostic "
+                            "for the Stokes residual derivative with respect to "
+                            "independent quadrature-point viscosity values.");
+          prm.declare_entry("Direct Stokes viscosity derivative test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the direct Stokes "
+                            "viscosity derivative diagnostic.");
+          prm.declare_entry("Run transposed advection constraint test", "false",
+                            Patterns::Bool(),
+                            "Run a regression diagnostic that checks the "
+                            "transposed advection solve enforces homogeneous "
+                            "adjoint values on constrained advection DoFs.");
+          prm.declare_entry("Run artificial viscosity coefficient seed test", "false",
+                            Patterns::Bool(),
+                            "Run an isolated finite-difference dot-product "
+                            "diagnostic for the derivative of the advection "
+                            "residual with respect to independent cellwise "
+                            "artificial-viscosity coefficients.");
+          prm.declare_entry("Artificial viscosity coefficient seed test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the artificial "
+                            "viscosity coefficient seed diagnostic.");
+          prm.declare_entry("Run artificial viscosity estimator transpose test", "false",
+                            Patterns::Bool(),
+                            "Run a standalone finite-difference dot-product "
+                            "diagnostic for the transpose of the entropy-viscosity "
+                            "estimator from cellwise artificial-viscosity seed "
+                            "to old/old-old field and velocity states.");
+          prm.declare_entry("Artificial viscosity estimator transpose test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the artificial "
+                            "viscosity estimator transpose diagnostic.");
+          prm.declare_entry("Run local entropy residual transpose test", "false",
+                            Patterns::Bool(),
+                            "Run a frozen-denominator diagnostic for the local "
+                            "max-residual/entropy-deviation numerator of the "
+                            "alpha=2 entropy-viscosity estimator.");
+          prm.declare_entry("Local entropy residual transpose test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the local entropy "
+                            "residual transpose diagnostic.");
+          prm.declare_entry("Run global entropy denominator scalar test", "false",
+                            Patterns::Bool(),
+                            "Run a scalar finite-difference diagnostic for the "
+                            "global_entropy_variation denominator in the alpha=2 "
+                            "entropy-viscosity estimator.");
+          prm.declare_entry("Global entropy denominator scalar test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the global entropy "
+                            "denominator scalar diagnostic.");
+          prm.declare_entry("Run global entropy variation transpose test", "false",
+                            Patterns::Bool(),
+                            "Run a standalone finite-difference diagnostic for "
+                            "global_entropy_variation(field_history), freezing "
+                            "the average_field supplied by the extrapolated "
+                            "field range.");
+          prm.declare_entry("Global entropy variation transpose test epsilon", "1e-7",
+                            Patterns::Double(0.0),
+                            "Finite-difference epsilon used by the global entropy "
+                            "variation transpose diagnostic.");
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::initialize_simulator(Simulator<dim> &simulator_object)
+    {
+      // Manager is a facade over stateful subcomponents, all of which must
+      // reference the same mutable Simulator instance. Initialization is done
+      // once here so workflows never carry independently owned solver state.
+      simulator = &simulator_object;
+
+      // Initialize the read-only SimulatorAccess interface explicitly. Calling
+      // this->initialize_simulator() here would recurse into this overload.
+      this->SimulatorAccess<dim>::initialize_simulator(simulator_object);
+      objective_manager.initialize_simulator(simulator_object);
+      diagnostics_manager.initialize_simulator(simulator_object);
+      initial_temperature_optimization.initialize_simulator(simulator_object);
+      trajectory_manager.initialize_simulator(simulator_object);
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::initialize_simulator(const Simulator<dim> &)
+    {
+      // This override exists only to reject initialization through the generic
+      // SimulatorAccess interface, which cannot provide the mutable simulator
+      // access required by the adjoint workflow.
+      AssertThrow(false,
+                  ExcMessage("The adjoint manager requires mutable simulator access. "
+                             "Call initialize_simulator(Simulator<dim> &) instead."));
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::parse_parameters(ParameterHandler &prm)
+    {
+      Assert(simulator != nullptr, ExcInternalError());
+
+      // Parse capability-owned sections first. The remaining values below are
+      // facade routing switches or typed test injections; no numerical
+      // operator configuration is hidden inside an objective implementation.
+      objective_manager.parse_parameters(prm);
+      initial_temperature_optimization.parse_parameters(prm);
+      trajectory_manager.parse_parameters(prm);
+
+      prm.enter_subsection("Material model");
+      {
+        material_model_name = prm.get("Model name");
+      }
+      prm.leave_subsection();
+
+      prm.enter_subsection("Adjoint");
+      {
+        prm.enter_subsection("Time dependent");
+        {
+          advection_preconditioner = prm.get("Advection preconditioner");
+        }
+        prm.leave_subsection();
+
+        prm.enter_subsection("Diagnostics");
+        {
+          run_trajectory_replay_check = prm.get_bool("Run trajectory replay diagnostic");
+          trajectory_replay_tolerance = prm.get_double("Trajectory replay tolerance");
+          run_sparse_trajectory_replay_check =
+            prm.get_bool("Run sparse trajectory replay validation");
+          const int requested_stop_after_checkpoint =
+            prm.get_integer("Stop after adjoint checkpoint");
+          // ParameterHandler exposes the user-facing -1 sentinel as a signed
+          // value. Convert once at the boundary so internal code uses the
+          // deal.II invalid-index convention and unsigned step counters.
+          stop_after_adjoint_checkpoint =
+            requested_stop_after_checkpoint < 0
+            ? numbers::invalid_unsigned_int
+            : static_cast<unsigned int>(requested_stop_after_checkpoint);
+          lifecycle_failure_injection = Diagnostics::parse_lifecycle_failure_point(
+                                          prm.get("Lifecycle failure injection"));
+          checkpoint_transaction_failure_injection =
+            Diagnostics::parse_checkpoint_failure_point(
+              prm.get("Checkpoint transaction failure injection"));
+          checkpoint_transaction_failure_rank =
+            prm.get_integer("Checkpoint transaction failure rank");
+          const int requested_checkpoint_failure_step =
+            prm.get_integer("Checkpoint transaction failure next reverse step");
+          checkpoint_transaction_failure_next_reverse_step =
+            requested_checkpoint_failure_step < 0
+            ? numbers::invalid_unsigned_int
+            : static_cast<unsigned int>(requested_checkpoint_failure_step);
+          trajectory_cleanup_failure_injection =
+            Diagnostics::parse_cleanup_failure_point(
+              prm.get("Trajectory cleanup failure injection"));
+          trajectory_cleanup_failure_rank =
+            prm.get_integer("Trajectory cleanup failure rank");
+          const int requested_cleanup_failure_step =
+            prm.get_integer("Trajectory cleanup failure next reverse step");
+          trajectory_cleanup_failure_next_reverse_step =
+            requested_cleanup_failure_step < 0
+            ? numbers::invalid_unsigned_int
+            : static_cast<unsigned int>(requested_cleanup_failure_step);
+          trajectory_append_failure_injection = Diagnostics::parse_append_failure_point(
+                                                  prm.get("Trajectory append failure injection"));
+          trajectory_append_failure_rank = prm.get_integer("Trajectory append failure rank");
+          const int requested_append_failure_step =
+            prm.get_integer("Trajectory append failure step");
+          trajectory_append_failure_step =
+            requested_append_failure_step < 0
+            ? numbers::invalid_unsigned_int
+            : static_cast<unsigned int>(requested_append_failure_step);
+          run_trajectory_stokes_recovery_check =
+            prm.get_bool("Run trajectory Stokes recovery diagnostic");
+          run_matrix_free_cold_rebuild_diagnostic =
+            prm.get_bool("Run matrix-free cold rebuild diagnostic");
+          diagnostics_manager.set_output_memory_checkpoints(
+            prm.get_bool("Output MPI adjoint memory diagnostics"));
+          trajectory_stokes_recovery_tolerance =
+            prm.get_double("Trajectory Stokes recovery tolerance");
+          run_advection_preconditioner_comparison =
+            prm.get_bool("Run advection preconditioner comparison");
+          run_material_model_adjoint_vjp_diagnostic =
+            prm.get_bool("Run material model adjoint VJP test");
+          material_model_adjoint_vjp_diagnostic_epsilon =
+            prm.get_double("Material model adjoint VJP test epsilon");
+          run_composition_stokes_rhs_transpose_diagnostic =
+            prm.get_bool("Run C to Stokes RHS transpose test");
+          composition_stokes_rhs_transpose_diagnostic_epsilon =
+            prm.get_double("C to Stokes RHS transpose test epsilon");
+          run_direct_stokes_viscosity_derivative_diagnostic =
+            prm.get_bool("Run direct Stokes viscosity derivative test");
+          direct_stokes_viscosity_derivative_diagnostic_epsilon =
+            prm.get_double("Direct Stokes viscosity derivative test epsilon");
+          run_transposed_advection_constraint_diagnostic =
+            prm.get_bool("Run transposed advection constraint test");
+          run_artificial_viscosity_coefficient_seed_diagnostic =
+            prm.get_bool("Run artificial viscosity coefficient seed test");
+          artificial_viscosity_coefficient_seed_diagnostic_epsilon =
+            prm.get_double("Artificial viscosity coefficient seed test epsilon");
+          run_artificial_viscosity_estimator_transpose_diagnostic =
+            prm.get_bool("Run artificial viscosity estimator transpose test");
+          artificial_viscosity_estimator_transpose_diagnostic_epsilon =
+            prm.get_double("Artificial viscosity estimator transpose test epsilon");
+          run_local_entropy_residual_transpose_diagnostic =
+            prm.get_bool("Run local entropy residual transpose test");
+          local_entropy_residual_transpose_diagnostic_epsilon =
+            prm.get_double("Local entropy residual transpose test epsilon");
+          run_global_entropy_denominator_scalar_diagnostic =
+            prm.get_bool("Run global entropy denominator scalar test");
+          global_entropy_denominator_scalar_diagnostic_epsilon =
+            prm.get_double("Global entropy denominator scalar test epsilon");
+          run_global_entropy_variation_transpose_diagnostic =
+            prm.get_bool("Run global entropy variation transpose test");
+          global_entropy_variation_transpose_diagnostic_epsilon =
+            prm.get_double("Global entropy variation transpose test epsilon");
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::initialize()
+    {}
+
+
+
+    template <int dim>
+    const KernelRepository<dim> &
+    Manager<dim>::get_kernels() const
+    {
+      return kernels;
+    }
+
+
+
+    template <int dim>
+    std::map<std::string, double>
+    Manager<dim>::get_objective_values() const
+    {
+      // Expose values by stable plugin name and do not leak ObjectiveResult
+      // ownership. Time-dependent running/terminal aggregation is finalized by
+      // its workflow before populating this result list.
+      std::map<std::string, double> values;
+
+      for (const auto &objective_result : objective_results)
+        values[objective_result->objective_name] = objective_result->value;
+
+      return values;
+    }
+
+    template <int dim>
+    const LinearAlgebra::BlockVector &
+    Manager<dim>::get_initial_temperature_gradient() const
+    {
+      return time_dependent_workflow.initial_temperature_gradient;
+    }
+
+
+
+    template <int dim>
+    const std::vector<LinearAlgebra::BlockVector> &
+    Manager<dim>::get_initial_composition_gradients() const
+    {
+      return time_dependent_workflow.initial_composition_gradients;
+    }
+
+    template <int dim>
+    bool
+    Manager<dim>::time_dependent_temperature_workflow_enabled() const
+    {
+      using NonlinearSolver = typename Parameters<dim>::NonlinearSolver;
+
+      // The specialized solver scheme is the integration point that records
+      // accepted snapshots and invokes the reverse sweep. Merely selecting a
+      // time-dependent objective does not retrofit these hooks into an
+      // arbitrary nonlinear solver scheme.
+      return this->get_parameters().nonlinear_solver
+             == NonlinearSolver::single_Advection_single_Stokes_adjoint_temperature;
+    }
+
+
+    template <int dim>
+    bool
+    Manager<dim>::optimization_enabled() const
+    {
+      return initial_temperature_optimization.enabled();
+    }
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_initial_temperature_optimization()
+    {
+      initial_temperature_optimization.run(*this);
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::inject_lifecycle_failure(
+      const Diagnostics::LifecycleFailurePoint point,
+      const unsigned int next_reverse_step) const
+    {
+      // Injection points are typed transaction boundaries. They are checked
+      // by the workflow only after it has established the stated durable
+      // frontier, making failures reproducible without string comparisons in
+      // production storage code.
+      if (lifecycle_failure_injection == point)
+        AssertThrow(false,
+                    ExcMessage("Injected adjoint lifecycle interruption "
+                               + Diagnostics::to_string(point) + " before reverse step "
+                               + Utilities::int_to_string(next_reverse_step)
+                               + ". Restart with 'Lifecycle failure injection = none' "
+                               "to verify recovery."));
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::finalize_time_dependent_temperature()
+    {
+      // All reverse-time implementation and ownership live in the workflow;
+      // the facade is intentionally a one-line integration entry point for
+      // Simulator's specialized nonlinear solver scheme.
+      time_dependent_workflow.run(*this);
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::solve_instantaneous_stokes()
+    {
+      Assert(simulator != nullptr, ExcInternalError());
+
+      // The steady workflow owns forward postprocessor preparation, objective
+      // RHS construction, physical transpose solves, and kernel aggregation.
+      // Manager retains only the resulting public artifacts.
+      InstantaneousStokesWorkflow<dim>(*simulator, objective_manager)
+      .run(objective_results, adjoint_states, kernels);
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template class Adjoint::Manager<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/core/manager.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/core/simulator_state.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#include <aspect/adjoint/core/simulator_state.h>
+#include <aspect/simulator.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    ScopedSimulatorState<dim>::ScopedSimulatorState(Simulator<dim> &simulator_object)
+      :
+      simulator(simulator_object),
+      solution(simulator.solution),
+      old_solution(simulator.old_solution),
+      old_old_solution(simulator.old_old_solution),
+      current_linearization_point(simulator.current_linearization_point),
+      system_rhs(simulator.system_rhs),
+      current_constraints(simulator.current_constraints),
+      time(simulator.time),
+      time_step(simulator.time_step),
+      old_time_step(simulator.old_time_step),
+      pressure_normalization_adjustment(simulator.last_pressure_normalization_adjustment),
+      pressure_scaling(simulator.pressure_scaling),
+      timestep_number(simulator.timestep_number),
+      nonlinear_iteration(simulator.nonlinear_iteration),
+      nonlinear_solver_failures(simulator.nonlinear_solver_failures),
+      linear_solver_failures(simulator.linear_solver_failures),
+      rebuild_sparsity_and_matrices(simulator.rebuild_sparsity_and_matrices),
+      rebuild_stokes_matrix(simulator.rebuild_stokes_matrix),
+      rebuild_stokes_preconditioner(simulator.rebuild_stokes_preconditioner),
+      active(true)
+    {}
+
+
+
+    template <int dim>
+    void
+    ScopedSimulatorState<dim>::restore()
+    {
+      if (!active)
+        return;
+
+      // Restore vectors before scalar time information and constraints. This
+      // mirrors the order in which replay code installs a state and ensures
+      // that any subsequent constraint rebuild observes the original fields.
+      simulator.solution = solution;
+      simulator.old_solution = old_solution;
+      simulator.old_old_solution = old_old_solution;
+      simulator.current_linearization_point = current_linearization_point;
+      simulator.system_rhs = system_rhs;
+      simulator.current_constraints.copy_from(current_constraints);
+      simulator.time = time;
+      simulator.time_step = time_step;
+      simulator.old_time_step = old_time_step;
+      simulator.last_pressure_normalization_adjustment = pressure_normalization_adjustment;
+      simulator.pressure_scaling = pressure_scaling;
+      simulator.timestep_number = timestep_number;
+      simulator.nonlinear_iteration = nonlinear_iteration;
+      simulator.nonlinear_solver_failures = nonlinear_solver_failures;
+      simulator.linear_solver_failures = linear_solver_failures;
+      simulator.rebuild_sparsity_and_matrices = rebuild_sparsity_and_matrices;
+      simulator.rebuild_stokes_matrix = rebuild_stokes_matrix;
+      simulator.rebuild_stokes_preconditioner = rebuild_stokes_preconditioner;
+      active = false;
+    }
+
+
+
+    template <int dim>
+    void
+    ScopedSimulatorState<dim>::release()
+    {
+      active = false;
+    }
+
+
+
+    template <int dim>
+    ScopedSimulatorState<dim>::~ScopedSimulatorState() noexcept
+    {
+      if (active)
+        try
+          {
+            restore();
+          }
+        catch (...)
+          {
+            // Destructors must not throw while another exception is already
+            // leaving an adjoint assembly. A failed restoration is a fatal
+            // invariant violation and is reported without a second throw.
+            AssertNothrow(false,
+            ExcMessage("Restoring temporary adjoint Simulator state failed."));
+          }
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) template class Adjoint::ScopedSimulatorState<dim>;
+  ASPECT_INSTANTIATE(INSTANTIATE)
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/core/simulator_state.cc
+========================================================================================

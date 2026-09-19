@@ -23,6 +23,7 @@
 #include <aspect/mesh_deformation/free_surface.h>
 #include <aspect/utilities.h>
 #include <aspect/postprocess/geoid.h>
+#include <aspect/postprocess/geoid_harmonics.h>
 #include <aspect/postprocess/dynamic_topography.h>
 #include <aspect/postprocess/boundary_densities.h>
 #include <aspect/geometry_model/spherical_shell.h>
@@ -36,17 +37,19 @@ namespace aspect
   namespace Postprocess
   {
     template <int dim>
-    std::pair<std::vector<double>,std::vector<double>>
+    SphericalHarmonicCoefficients
     Geoid<dim>::to_spherical_harmonic_coefficients(const std::vector<std::vector<double>> &spherical_function) const
     {
       std::vector<double> cosi(spherical_function.size(),0);
       std::vector<double> sini(spherical_function.size(),0);
-      std::vector<double> coecos;
-      std::vector<double> coesin;
+      SphericalHarmonicCoefficients coefficients(minimum_degree, maximum_degree);
+      std::vector<double> cosine(coefficients.size(), 0.0);
+      std::vector<double> sine(coefficients.size(), 0.0);
 
-      for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
+      unsigned int coefficient_index = 0;
+      for (unsigned int ideg = minimum_degree; ideg <= maximum_degree; ++ideg)
         {
-          for (unsigned int iord = 0; iord < ideg+1; ++iord)
+          for (unsigned int iord = 0; iord <= ideg; ++iord, ++coefficient_index)
             {
               // Do the spherical harmonic expansion.
               for (unsigned int ds_num = 0; ds_num < spherical_function.size(); ++ds_num)
@@ -67,115 +70,29 @@ namespace aspect
                   cosii += cosi.at(ds_num) * spherical_function.at(ds_num).at(2);
                   sinii += sini.at(ds_num) * spherical_function.at(ds_num).at(2);
                 }
-              coecos.push_back(cosii);
-              coesin.push_back(sinii);
+              cosine[coefficient_index] = cosii;
+              sine[coefficient_index] = sinii;
             }
         }
       // Sum over each processor.
-      dealii::Utilities::MPI::sum (coecos,this->get_mpi_communicator(),coecos);
-      dealii::Utilities::MPI::sum (coesin,this->get_mpi_communicator(),coesin);
+      dealii::Utilities::MPI::sum(cosine, this->get_mpi_communicator(), cosine);
+      dealii::Utilities::MPI::sum(sine, this->get_mpi_communicator(), sine);
 
-      return std::make_pair(coecos,coesin);
+      coefficients.set_coefficients(cosine, sine);
+      return coefficients;
     }
 
     template <int dim>
-    std::pair<std::vector<double>,std::vector<double>>
-    Geoid<dim>::density_contribution (const double &/*outer_radius*/) const
-    {
-      Assert(false, ExcNotImplemented());
-      return std::make_pair(std::vector<double>(), std::vector<double>());
-
-    }
-
-    template <>
-    std::pair<std::vector<double>,std::vector<double>>
-    Geoid<3>::density_contribution (const double &outer_radius) const
-    {
-      const unsigned int quadrature_degree = this->introspection().polynomial_degree.temperature;
-
-      // Need to evaluate density contribution of each volume quadrature point.
-      const QGauss<3> quadrature_formula(quadrature_degree);
-
-      FEValues<3> fe_values (this->get_mapping(),
-                             this->get_fe(),
-                             quadrature_formula,
-                             update_values |
-                             update_quadrature_points |
-                             update_JxW_values |
-                             update_gradients);
-
-      MaterialModel::MaterialModelInputs<3> in(fe_values.n_quadrature_points, this->n_compositional_fields());
-      MaterialModel::MaterialModelOutputs<3> out(fe_values.n_quadrature_points, this->n_compositional_fields());
-      in.requested_properties = MaterialModel::MaterialProperties::density;
-
-      std::vector<std::vector<double>>
-      composition_values(this->n_compositional_fields(), std::vector<double>(quadrature_formula.size()));
-
-      // Directly do the global 3d integral over each quadrature point of every cell (different from traditional way to do layer integral).
-      // This is necessary because of ASPECT's adaptive mesh refinement feature.
-      std::vector<double> SH_density_coecos;
-      std::vector<double> SH_density_coesin;
-      for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
-        {
-          for (unsigned int iord = 0; iord < ideg+1; ++iord)
-            {
-              // Initialization of the density contribution integral per degree, order.
-              double integrated_density_cos_component = 0;
-              double integrated_density_sin_component = 0;
-
-              // Loop over all of the cells.
-              for (const auto &cell : this->get_dof_handler().active_cell_iterators())
-                if (cell->is_locally_owned())
-                  {
-                    fe_values.reinit (cell);
-                    // Set use_strain_rates to false since we don't need viscosity.
-                    in.reinit(fe_values, cell, this->introspection(), this->get_solution());
-
-                    this->get_material_model().evaluate(in, out);
-
-                    // Compute the integral of the density function
-                    // over the cell, by looping over all quadrature points.
-                    for (unsigned int q=0; q<quadrature_formula.size(); ++q)
-                      {
-                        // Convert coordinates from [x,y,z] to [r, phi, theta].
-                        const std::array<double,3> scoord = aspect::Utilities::Coordinates::cartesian_to_spherical_coordinates(in.position[q]);
-
-                        // Normalization after Dahlen and Tromp (1986) Appendix B.6.
-                        const std::pair<double,double> sph_harm_vals = aspect::Utilities::real_spherical_harmonic(ideg,iord,scoord[2],scoord[1]);
-                        const double cos_component = sph_harm_vals.first; // real / cos part
-                        const double sin_component = sph_harm_vals.second; // imaginary / sin part
-
-                        const double density = out.densities[q];
-                        const double r_q = in.position[q].norm();
-                        const double JxW = fe_values.JxW(q);
-
-                        integrated_density_cos_component += density * (1./r_q) * Utilities::pow(r_q/outer_radius,ideg+1) * cos_component * JxW;
-                        integrated_density_sin_component += density * (1./r_q) * Utilities::pow(r_q/outer_radius,ideg+1) * sin_component * JxW;
-                      }
-                  }
-              SH_density_coecos.push_back(integrated_density_cos_component);
-              SH_density_coesin.push_back(integrated_density_sin_component);
-            }
-        }
-      // Sum over each processor.
-      dealii::Utilities::MPI::sum (SH_density_coecos,this->get_mpi_communicator(),SH_density_coecos);
-      dealii::Utilities::MPI::sum (SH_density_coesin,this->get_mpi_communicator(),SH_density_coesin);
-
-      return std::make_pair(SH_density_coecos,SH_density_coesin);
-    }
-
-    template <int dim>
-    std::pair<std::pair<double, std::pair<std::vector<double>,std::vector<double>>>, std::pair<double, std::pair<std::vector<double>,std::vector<double>>>>
+    typename Geoid<dim>::TopographyHarmonics
     Geoid<dim>::topography_contribution(const double &/*outer_radius*/,
                                         const double &/*inner_radius*/) const
     {
       Assert(false, ExcNotImplemented());
-      std::pair<double, std::pair<std::vector<double>,std::vector<double>>> temp;
-      return std::make_pair(temp, temp);
+      return {};
     }
 
     template <>
-    std::pair<std::pair<double, std::pair<std::vector<double>,std::vector<double>>>, std::pair<double, std::pair<std::vector<double>,std::vector<double>>>>
+    Geoid<3>::TopographyHarmonics
     Geoid<3>::topography_contribution(const double &outer_radius,
                                       const double &inner_radius) const
     {
@@ -201,7 +118,7 @@ namespace aspect
 
       // Vectors to store the location, infinitesimal area, and topography associated with each quadrature point of each surface and bottom cell respectively.
       std::vector<std::pair<Point<3>,std::pair<double,double>>> surface_stored_values;
-      std::vector<std::pair<Point<3>,std::pair<double,double>>> CMB_stored_values;
+      std::vector<std::pair<Point<3>,std::pair<double,double>>> cmb_stored_values;
 
       // Loop over all of the boundary cells and if one is at
       // surface or CMB, evaluate the topography vector there.
@@ -254,7 +171,7 @@ namespace aspect
             // If the cell is at the top boundary, add its contributions to the topography surface storage vector.
             if (at_upper_surface)
               {
-                if (include_surface_topo_contribution == true)
+                if (include_surface_topography_contribution == true)
                   {
                     if (use_free_surface_topography == true)
                       {
@@ -301,15 +218,15 @@ namespace aspect
             // If the cell is at the bottom boundary, add its contributions to the topography CMB storage vector.
             if (at_upper_surface == false)
               {
-                if (include_CMB_topo_contribution == true)
+                if (include_cmb_topography_contribution == true)
                   {
-                    if (use_free_CMB_topography == true)
+                    if (use_free_cmb_topography == true)
                       {
                         for (unsigned int q=0; q<fe_face_values.n_quadrature_points; ++q)
                           {
                             const Point<3> current_position = fe_face_values.quadrature_point(q);
                             const double topography = this->get_geometry_model().height_above_reference_surface(current_position) + (outer_radius - inner_radius);
-                            CMB_stored_values.emplace_back (current_position, std::make_pair(fe_face_values.JxW(q), topography));
+                            cmb_stored_values.emplace_back (current_position, std::make_pair(fe_face_values.JxW(q), topography));
                           }
                       }
                     else
@@ -327,7 +244,7 @@ namespace aspect
 
                         for (unsigned int q=0; q<fe_face_values.n_quadrature_points; ++q)
                           {
-                            CMB_stored_values.emplace_back (fe_face_values.quadrature_point(q), std::make_pair(fe_face_values.JxW(q), topo_values[q]));
+                            cmb_stored_values.emplace_back (fe_face_values.quadrature_point(q), std::make_pair(fe_face_values.JxW(q), topo_values[q]));
                           }
                       }
                   }
@@ -339,7 +256,7 @@ namespace aspect
                       {
                         for (unsigned int q=0; q<fe_face_values.n_quadrature_points; ++q)
                           {
-                            CMB_stored_values.emplace_back (fe_face_values.quadrature_point(q), std::make_pair(fe_face_values.JxW(q), 0.0));
+                            cmb_stored_values.emplace_back (fe_face_values.quadrature_point(q), std::make_pair(fe_face_values.JxW(q), 0.0));
                           }
                       }
                   }
@@ -347,7 +264,7 @@ namespace aspect
           }
 
       std::vector<std::vector<double>> surface_topo_spherical_function;
-      std::vector<std::vector<double>> CMB_topo_spherical_function;
+      std::vector<std::vector<double>> cmb_topography_spherical_function;
 
       for (const auto &surface_stored_value : surface_stored_values)
         {
@@ -364,26 +281,29 @@ namespace aspect
                                                                            });
         }
 
-      for (const auto &CMB_stored_value : CMB_stored_values)
+      for (const auto &cmb_stored_value : cmb_stored_values)
         {
-          const std::array<double,3> scoord = aspect::Utilities::Coordinates::cartesian_to_spherical_coordinates(CMB_stored_value.first);
+          const std::array<double,3> scoord = aspect::Utilities::Coordinates::cartesian_to_spherical_coordinates(cmb_stored_value.first);
 
           // Calculate spherical infinitesimal sin(theta)*d_theta*d_phi by infinitesimal_area/radius^2
-          const double infinitesimal = CMB_stored_value.second.first/(inner_radius*inner_radius);
+          const double infinitesimal = cmb_stored_value.second.first/(inner_radius*inner_radius);
 
           // Theta, phi, spherical infinitesimal, and CMB dynamic topography
-          CMB_topo_spherical_function.emplace_back(std::vector<double> {scoord[2],
-                                                                        scoord[1],
-                                                                        infinitesimal,
-                                                                        CMB_stored_value.second.second
-                                                                       });
+          cmb_topography_spherical_function.emplace_back(std::vector<double> {scoord[2],
+                                                                              scoord[1],
+                                                                              infinitesimal,
+                                                                              cmb_stored_value.second.second
+                                                                             });
         }
 
-      std::pair<double, std::pair<std::vector<double>,std::vector<double>>> SH_surface_topo_coes
-        = std::make_pair(top_layer_average_density,to_spherical_harmonic_coefficients(surface_topo_spherical_function));
-      std::pair<double, std::pair<std::vector<double>,std::vector<double>>> SH_CMB_topo_coes
-        = std::make_pair(bottom_layer_average_density,to_spherical_harmonic_coefficients(CMB_topo_spherical_function));
-      return std::make_pair(SH_surface_topo_coes,SH_CMB_topo_coes);
+      TopographyHarmonics result;
+      result.surface.average_density = top_layer_average_density;
+      result.surface.topography =
+        to_spherical_harmonic_coefficients(surface_topo_spherical_function);
+      result.cmb.average_density = bottom_layer_average_density;
+      result.cmb.topography =
+        to_spherical_harmonic_coefficients(cmb_topography_spherical_function);
+      return result;
     }
 
 
@@ -415,92 +335,52 @@ namespace aspect
       surface_point[0] = outer_radius;
       const double surface_gravity = this->get_gravity_model().gravity_vector(surface_point).norm();
 
-      // Get the value of the universal gravitational constant.
-      const double G = aspect::constants::big_g;
-
-      // Get the spherical harmonic coefficients of the density contribution.
-      std::pair<std::vector<double>,std::vector<double>> SH_density_coes = density_contribution(outer_radius);
-      std::pair<double, std::pair<std::vector<double>,std::vector<double>>> SH_surface_topo_coes;
-      std::pair<double, std::pair<std::vector<double>,std::vector<double>>> SH_CMB_topo_coes;
+      // Get fully scaled spherical-harmonic geoid coefficients from the
+      // mantle-density contribution.
+      const SphericalHarmonicCoefficients density_geoid_coefficients =
+        compute_density_geoid_harmonics(*this, minimum_degree, maximum_degree,
+                                        outer_radius, surface_gravity);
 
       // Initialize the surface and CMB density contrasts with NaNs because they may be unused in case of no topography contribution.
       double surface_delta_rho = numbers::signaling_nan<double>();
-      double CMB_delta_rho = numbers::signaling_nan<double>();
+      double cmb_density_contrast = numbers::signaling_nan<double>();
 
       // Get the spherical harmonic coefficients of the surface and CMB topography.
-      std::pair<std::pair<double, std::pair<std::vector<double>,std::vector<double>>>, std::pair<double, std::pair<std::vector<double>,std::vector<double>>>> SH_topo_coes;
-      SH_topo_coes = topography_contribution(outer_radius,inner_radius);
-      SH_surface_topo_coes = SH_topo_coes.first;
-      SH_CMB_topo_coes = SH_topo_coes.second;
+      const TopographyHarmonics topography_harmonics =
+        topography_contribution(outer_radius, inner_radius);
 
       // Get the density contrast at the surface and CMB to replace the initialized NaN values.
       // The surface and CMB density contrasts will be used later to calculate geoid,
       // and the spherical harmonic output of the surface and CMB topography contribution to geoid.
-      surface_delta_rho =  SH_surface_topo_coes.first - density_above;
-      CMB_delta_rho = density_below - SH_CMB_topo_coes.first;
+      surface_delta_rho = topography_harmonics.surface.average_density - density_above;
+      cmb_density_contrast = density_below - topography_harmonics.cmb.average_density;
 
-      // Compute the spherical harmonic coefficients of geoid anomaly.
-      std::vector<double> density_anomaly_contribution_coecos;
-      std::vector<double> density_anomaly_contribution_coesin;
-      std::vector<double> surface_topo_contribution_coecos;
-      std::vector<double> surface_topo_contribution_coesin;
-      std::vector<double> CMB_topo_contribution_coecos;
-      std::vector<double> CMB_topo_contribution_coesin;
-      geoid_coecos.clear();
-      geoid_coesin.clear();
+      // The boundary projection and degree scaling are deliberately separate:
+      // free-surface and CBF paths prepare the same coefficient-space input,
+      // and the shared scaling routines are also used by adjoint objectives.
+      const SphericalHarmonicCoefficients surface_topography_geoid_coefficients =
+        scale_surface_topography_geoid_harmonics(
+          topography_harmonics.surface.topography,
+          outer_radius,
+          surface_gravity,
+          surface_delta_rho);
+      const SphericalHarmonicCoefficients cmb_topography_geoid_coefficients =
+        scale_cmb_topography_geoid_harmonics(
+          topography_harmonics.cmb.topography,
+          outer_radius,
+          inner_radius,
+          surface_gravity,
+          cmb_density_contrast);
 
-      // First compute the spherical harmonic contributions from density anomaly, surface topography and CMB topography.
-      int ind = 0; // coefficients index
-      for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
+      geoid_coefficients = density_geoid_coefficients;
+      for (unsigned int index = 0; index < geoid_coefficients.size(); ++index)
         {
-          for (unsigned int iord = 0; iord < ideg+1; ++iord)
-            {
-              double coecos_density_anomaly = (4 * numbers::PI * G / (surface_gravity * (2 * ideg + 1))) * SH_density_coes.first.at(ind);
-              double coesin_density_anomaly = (4 * numbers::PI * G / (surface_gravity * (2 * ideg + 1))) * SH_density_coes.second.at(ind);
-              density_anomaly_contribution_coecos.push_back(coecos_density_anomaly);
-              density_anomaly_contribution_coesin.push_back(coesin_density_anomaly);
-
-              if (include_surface_topo_contribution == true || include_CMB_topo_contribution == true)
-                {
-                  const double coecos_surface_topo = (4 * numbers::PI * G / (surface_gravity * (2 * ideg + 1)))
-                                                     * surface_delta_rho*SH_surface_topo_coes.second.first.at(ind)*outer_radius;
-                  const double coesin_surface_topo = (4 * numbers::PI * G / (surface_gravity * (2 * ideg + 1)))
-                                                     * surface_delta_rho*SH_surface_topo_coes.second.second.at(ind)*outer_radius;
-                  surface_topo_contribution_coecos.push_back(coecos_surface_topo);
-                  surface_topo_contribution_coesin.push_back(coesin_surface_topo);
-
-                  const double coecos_CMB_topo = (4 * numbers::PI * G / (surface_gravity * (2 * ideg + 1)))
-                                                 * CMB_delta_rho*SH_CMB_topo_coes.second.first.at(ind)*inner_radius*Utilities::pow(inner_radius/outer_radius,ideg+1);
-                  const double coesin_CMB_topo = (4 * numbers::PI * G / (surface_gravity * (2 * ideg + 1)))
-                                                 * CMB_delta_rho*SH_CMB_topo_coes.second.second.at(ind)*inner_radius*Utilities::pow(inner_radius/outer_radius,ideg+1);
-                  CMB_topo_contribution_coecos.push_back(coecos_CMB_topo);
-                  CMB_topo_contribution_coesin.push_back(coesin_CMB_topo);
-
-                }
-
-              ++ind;
-            }
-        }
-
-      // Then sum the three contributions together to get the spherical harmonic coefficients of geoid anomaly.
-      ind = 0; // coefficients index
-      for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
-        {
-          for (unsigned int iord = 0; iord < ideg+1; ++iord)
-            {
-              if (include_surface_topo_contribution == true || include_CMB_topo_contribution == true)
-                {
-                  geoid_coecos.push_back(density_anomaly_contribution_coecos.at(ind)+surface_topo_contribution_coecos.at(ind)+CMB_topo_contribution_coecos.at(ind));
-                  geoid_coesin.push_back(density_anomaly_contribution_coesin.at(ind)+surface_topo_contribution_coesin.at(ind)+CMB_topo_contribution_coesin.at(ind));
-                }
-              else
-                {
-                  geoid_coecos.push_back(density_anomaly_contribution_coecos.at(ind));
-                  geoid_coesin.push_back(density_anomaly_contribution_coesin.at(ind));
-                }
-
-              ind += 1;
-            }
+          geoid_coefficients.cosine(index) +=
+            surface_topography_geoid_coefficients.cosine(index)
+            + cmb_topography_geoid_coefficients.cosine(index);
+          geoid_coefficients.sine(index) +=
+            surface_topography_geoid_coefficients.sine(index)
+            + cmb_topography_geoid_coefficients.sine(index);
         }
 
       const QMidpoint<dim-1> quadrature_formula_face_center;
@@ -546,7 +426,7 @@ namespace aspect
         {
           int ind = 0;
           double geoid_value = 0;
-          for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
+          for (unsigned int ideg =  minimum_degree; ideg < maximum_degree+1; ++ideg)
             {
               for (unsigned int iord = 0; iord < ideg+1; ++iord)
                 {
@@ -555,7 +435,8 @@ namespace aspect
                   const double cos_component = sph_harm_vals.first; // real / cos part
                   const double sin_component = sph_harm_vals.second; // imaginary / sin part
 
-                  geoid_value += geoid_coecos.at(ind)*cos_component+geoid_coesin.at(ind)*sin_component;
+                  geoid_value += geoid_coefficients.cosine(ind) * cos_component
+                                 + geoid_coefficients.sine(ind) * sin_component;
                   ++ind;
                 }
             }
@@ -563,183 +444,126 @@ namespace aspect
         }
 
       // The user can get the spherical harmonic coefficients of the density anomaly contribution if needed
-      if (output_density_anomaly_contribution_SH_coes == true)
+      if (output_density_anomaly_contribution_coefficients == true)
         {
           // Have a stream into which we write the SH coefficients data from density anomaly contribution.
           // The text stream is then later sent to processor 0.
-          std::ostringstream output_density_anomaly_contribution_SH_coes;
+          std::ostringstream output_density_anomaly_contribution_coefficients;
 
-          // Prepare the output SH coefficients data from density anomaly contribution.
-          unsigned int SH_coes_ind = 0;
-          for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
-            {
-              for (unsigned int iord = 0; iord < ideg+1; ++iord)
-                {
-                  output_density_anomaly_contribution_SH_coes << ideg
-                                                              << ' '
-                                                              << iord
-                                                              << ' '
-                                                              << density_anomaly_contribution_coecos.at(SH_coes_ind)
-                                                              << ' '
-                                                              << density_anomaly_contribution_coesin.at(SH_coes_ind)
-                                                              << std::endl;
-                  ++SH_coes_ind;
-                }
-            }
+          write_spherical_harmonic_coefficients(
+            output_density_anomaly_contribution_coefficients,
+            density_geoid_coefficients);
 
-          const std::string density_anomaly_contribution_SH_coes_filename = this->get_output_directory() +
-                                                                            "geoid/density_anomaly_contribution_SH_coefficients." +
-                                                                            dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
+          const std::string density_anomaly_contribution_spherical_harmonic_filename = this->get_output_directory() +
+                                                                                       "geoid/density_anomaly_contribution_SH_coefficients." +
+                                                                                       dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
 
           // Because each processor already held all the SH coefficients from density anomaly contribution, we only need to stop by the processor 0 to get the data.
           // On processor 0, collect all the data and put them into the output density anomaly contribution SH coefficients file.
           if (dealii::Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) == 0)
             {
-              std::ofstream density_anomaly_contribution_SH_coes_file (density_anomaly_contribution_SH_coes_filename);
-              density_anomaly_contribution_SH_coes_file << "# "
-                                                        << "degree order cosine_coefficient sine_coefficient"
-                                                        << std::endl;
+              std::ofstream density_anomaly_contribution_spherical_harmonic_file (density_anomaly_contribution_spherical_harmonic_filename);
+              density_anomaly_contribution_spherical_harmonic_file << "# "
+                                                                   << "degree order cosine_coefficient sine_coefficient"
+                                                                   << std::endl;
 
               // Write out the data on processor 0.
-              density_anomaly_contribution_SH_coes_file << output_density_anomaly_contribution_SH_coes.str();
+              density_anomaly_contribution_spherical_harmonic_file << output_density_anomaly_contribution_coefficients.str();
             }
         }
 
       // The user can get the spherical harmonic coefficients of the surface topography contribution if needed
-      if (output_surface_topo_contribution_SH_coes == true)
+      if (output_surface_topography_contribution_coefficients == true)
         {
           // Have a stream into which we write the SH coefficients data from surface topography contribution.
           // The text stream is then later sent to processor 0.
-          std::ostringstream output_surface_topo_contribution_SH_coes;
+          std::ostringstream output_surface_topography_contribution_coefficients;
 
-          // Prepare the output SH coefficients data from surface topography contribution.
-          unsigned int SH_coes_ind = 0;
-          for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
-            {
-              for (unsigned int iord = 0; iord < ideg+1; ++iord)
-                {
-                  output_surface_topo_contribution_SH_coes << ideg
-                                                           << ' '
-                                                           << iord
-                                                           << ' '
-                                                           << surface_topo_contribution_coecos.at(SH_coes_ind)
-                                                           << ' '
-                                                           << surface_topo_contribution_coesin.at(SH_coes_ind)
-                                                           << std::endl;
-                  ++SH_coes_ind;
-                }
-            }
+          write_spherical_harmonic_coefficients(
+            output_surface_topography_contribution_coefficients,
+            surface_topography_geoid_coefficients);
 
-          const std::string surface_topo_contribution_SH_coes_filename = this->get_output_directory() +
-                                                                         "geoid/surface_topography_contribution_SH_coefficients." +
-                                                                         dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
+          const std::string surface_topography_contribution_spherical_harmonic_filename = this->get_output_directory() +
+                                                                                          "geoid/surface_topography_contribution_SH_coefficients." +
+                                                                                          dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
 
           // Because each processor already held all the SH coefficients from surface topography contribution,
           // we only need to stop by the processor 0 to get the data. On processor 0, collect all the data
           // and put them into the output surface topography contribution SH coefficients file.
           if (dealii::Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) == 0)
             {
-              std::ofstream surface_topo_contribution_SH_coes_file (surface_topo_contribution_SH_coes_filename);
-              surface_topo_contribution_SH_coes_file << "# "
-                                                     << "degree order cosine_coefficient sine_coefficient"
-                                                     << std::endl;
+              std::ofstream surface_topography_contribution_spherical_harmonic_file (surface_topography_contribution_spherical_harmonic_filename);
+              surface_topography_contribution_spherical_harmonic_file << "# "
+                                                                      << "degree order cosine_coefficient sine_coefficient"
+                                                                      << std::endl;
               std::ostringstream output_surface_delta_rho;
               output_surface_delta_rho << surface_delta_rho;
-              surface_topo_contribution_SH_coes_file << "surface density contrast(kg/m^3): "
-                                                     << output_surface_delta_rho.str()
-                                                     << std::endl;
+              surface_topography_contribution_spherical_harmonic_file << "surface density contrast(kg/m^3): "
+                                                                      << output_surface_delta_rho.str()
+                                                                      << std::endl;
               // Write out the data on processor 0
-              surface_topo_contribution_SH_coes_file << output_surface_topo_contribution_SH_coes.str();
+              surface_topography_contribution_spherical_harmonic_file << output_surface_topography_contribution_coefficients.str();
             }
         }
 
       // The user can get the spherical harmonic coefficients of the CMB topography contribution if needed.
-      if (output_CMB_topo_contribution_SH_coes == true)
+      if (output_cmb_topography_contribution_coefficients == true)
         {
           // Have a stream into which we write the SH coefficients data from CMB topography contribution.
           // The text stream is then later sent to processor 0.
-          std::ostringstream output_CMB_topo_contribution_SH_coes;
+          std::ostringstream output_cmb_topography_contribution_coefficients;
 
-          // Prepare the output SH coefficients data from CMB topography contribution.
-          unsigned int SH_coes_ind = 0;
-          for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
-            {
-              for (unsigned int iord = 0; iord < ideg+1; ++iord)
-                {
-                  output_CMB_topo_contribution_SH_coes << ideg
-                                                       << ' '
-                                                       << iord
-                                                       << ' '
-                                                       << CMB_topo_contribution_coecos.at(SH_coes_ind)
-                                                       << ' '
-                                                       << CMB_topo_contribution_coesin.at(SH_coes_ind)
-                                                       << std::endl;
-                  ++SH_coes_ind;
-                }
-            }
+          write_spherical_harmonic_coefficients(
+            output_cmb_topography_contribution_coefficients,
+            cmb_topography_geoid_coefficients);
 
-          const std::string CMB_topo_contribution_SH_coes_filename = this->get_output_directory() +
-                                                                     "geoid/CMB_topography_contribution_SH_coefficients." +
-                                                                     dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
+          const std::string cmb_topography_contribution_spherical_harmonic_filename = this->get_output_directory() +
+                                                                                      "geoid/CMB_topography_contribution_SH_coefficients." +
+                                                                                      dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
 
           // Because each processor already held all the SH coefficients from CMB topography contribution, we only need to stop by the processor 0
           // to get the data. On processor 0, collect all the data and put them into the output CMB topography contribution SH coefficients file.
           if (dealii::Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) == 0)
             {
-              std::ofstream CMB_topo_contribution_SH_coes_file (CMB_topo_contribution_SH_coes_filename);
-              CMB_topo_contribution_SH_coes_file << "# "
-                                                 << "degree order cosine_coefficient sine_coefficient"
-                                                 << std::endl;
-              std::ostringstream output_CMB_delta_rho;
-              output_CMB_delta_rho << CMB_delta_rho;
-              CMB_topo_contribution_SH_coes_file << "CMB density contrast(kg/m^3): "
-                                                 << output_CMB_delta_rho.str()
-                                                 << std::endl;
+              std::ofstream cmb_topography_contribution_spherical_harmonic_file (cmb_topography_contribution_spherical_harmonic_filename);
+              cmb_topography_contribution_spherical_harmonic_file << "# "
+                                                                  << "degree order cosine_coefficient sine_coefficient"
+                                                                  << std::endl;
+              std::ostringstream output_cmb_density_contrast;
+              output_cmb_density_contrast << cmb_density_contrast;
+              cmb_topography_contribution_spherical_harmonic_file << "CMB density contrast(kg/m^3): "
+                                                                  << output_cmb_density_contrast.str()
+                                                                  << std::endl;
               // Write out the data on processor 0
-              CMB_topo_contribution_SH_coes_file << output_CMB_topo_contribution_SH_coes.str();
+              cmb_topography_contribution_spherical_harmonic_file << output_cmb_topography_contribution_coefficients.str();
             }
         }
 
       // The user can get the spherical harmonic coefficients of the geoid anomaly if needed.
-      if (output_geoid_anomaly_SH_coes == true)
+      if (output_geoid_anomaly_coefficients == true)
         {
           // Have a stream into which we write the geoid anomaly SH coefficients data.
           // The text stream is then later sent to processor 0.
-          std::ostringstream output_geoid_anomaly_SH_coes;
+          std::ostringstream output_geoid_anomaly_coefficients;
 
-          // Prepare the output geoid anomaly SH coefficients data.
-          unsigned int SH_coes_ind = 0;
-          for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
-            {
-              for (unsigned int iord = 0; iord < ideg+1; ++iord)
-                {
-                  output_geoid_anomaly_SH_coes << ideg
-                                               << ' '
-                                               << iord
-                                               << ' '
-                                               << geoid_coecos.at(SH_coes_ind)
-                                               << ' '
-                                               << geoid_coesin.at(SH_coes_ind)
-                                               << std::endl;
-                  ++SH_coes_ind;
-                }
-            }
+          write_spherical_harmonic_coefficients(output_geoid_anomaly_coefficients,
+                                                geoid_coefficients);
 
-          const std::string geoid_anomaly_SH_coes_filename = this->get_output_directory() +
-                                                             "geoid/geoid_anomaly_SH_coefficients." +
-                                                             dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
+          const std::string geoid_anomaly_spherical_harmonic_filename = this->get_output_directory() +
+                                                                        "geoid/geoid_anomaly_SH_coefficients." +
+                                                                        dealii::Utilities::int_to_string(this->get_timestep_number(), 5);
 
           // Because each processor already held all the geoid anomaly SH coefficients, we only need to stop by the processor 0 to get the data.
           // On processor 0, collect all the data and put them into the output geoid anomaly SH coefficients file.
           if (dealii::Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) == 0)
             {
-              std::ofstream geoid_anomaly_SH_coes_file (geoid_anomaly_SH_coes_filename);
-              geoid_anomaly_SH_coes_file << "# "
-                                         << "degree order cosine_coefficient sine_coefficient"
-                                         << std::endl;
+              std::ofstream geoid_anomaly_spherical_harmonic_file (geoid_anomaly_spherical_harmonic_filename);
+              geoid_anomaly_spherical_harmonic_file << "# "
+                                                    << "degree order cosine_coefficient sine_coefficient"
+                                                    << std::endl;
 
               // Write out the data on processor 0.
-              geoid_anomaly_SH_coes_file << output_geoid_anomaly_SH_coes.str();
+              geoid_anomaly_spherical_harmonic_file << output_geoid_anomaly_coefficients.str();
             }
         }
 
@@ -819,7 +643,7 @@ namespace aspect
             {
               int ind = 0;
               double gravity_value = 0;
-              for (unsigned int ideg =  min_degree; ideg < max_degree+1; ++ideg)
+              for (unsigned int ideg =  minimum_degree; ideg < maximum_degree+1; ++ideg)
                 {
                   for (unsigned int iord = 0; iord < ideg+1; ++iord)
                     {
@@ -830,7 +654,9 @@ namespace aspect
 
                       // The conversion from geoid to gravity anomaly is given by gravity_anomaly = (l-1)*g/R_surface * geoid_anomaly
                       // based on Forte (2007) equation [97].
-                      gravity_value += (geoid_coecos.at(ind)*cos_component+geoid_coesin.at(ind)*sin_component) * (ideg - 1) * surface_gravity / outer_radius;
+                      gravity_value += (geoid_coefficients.cosine(ind) * cos_component
+                                        + geoid_coefficients.sine(ind) * sin_component)
+                                       * (ideg - 1) * surface_gravity / outer_radius;
                       ++ind;
                     }
                 }
@@ -889,7 +715,7 @@ namespace aspect
     {
       std::list<std::string> deps;
 
-      if ( (include_surface_topo_contribution == true && use_free_surface_topography == false) || (include_CMB_topo_contribution == true && use_free_CMB_topography == false) )
+      if ( (include_surface_topography_contribution == true && use_free_surface_topography == false) || (include_cmb_topography_contribution == true && use_free_cmb_topography == false) )
         deps.emplace_back("dynamic topography");
 
       deps.emplace_back("boundary densities");
@@ -912,18 +738,7 @@ namespace aspect
       const std::array<double,3> scoord = aspect::Utilities::Coordinates::cartesian_to_spherical_coordinates(p);
       const double theta = scoord[2];
       const double phi = scoord[1];
-      double value = 0.;
-
-      for (unsigned int ideg=min_degree, k=0; ideg < max_degree+1; ++ideg)
-        for (unsigned int iord = 0; iord < ideg+1; ++iord, ++k)
-          {
-            std::pair<double,double> val = aspect::Utilities::real_spherical_harmonic( ideg, iord, theta, phi );
-
-            value += geoid_coecos[k] * val.first +
-                     geoid_coesin[k] * val.second;
-
-          }
-      return value;
+      return geoid_coefficients.evaluate(theta, phi);
     }
 
     template <int dim>
@@ -980,10 +795,6 @@ namespace aspect
                             "Option to output the free-air gravity anomaly up to the maximum degree. "
                             "The unit of the output is in SI, hence $m/s^2$ ($1mgal = 10^-5 m/s^2$). The default is false. ");
 
-          prm.declare_alias("Output geoid anomaly coefficients","Also output the spherical harmonic coefficients of geoid anomaly");
-          prm.declare_alias("Output surface topography contribution coefficients","Also output the spherical harmonic coefficients of surface dynamic topography contribution");
-          prm.declare_alias("Output CMB topography contribution coefficients","Also output the spherical harmonic coefficients of CMB dynamic topography contribution");
-          prm.declare_alias("Output density anomaly contribution coefficients","Also output the spherical harmonic coefficients of density anomaly contribution");
           prm.declare_alias("Output gravity anomaly","Also output the gravity anomaly");
         }
         prm.leave_subsection ();
@@ -1001,17 +812,17 @@ namespace aspect
       {
         prm.enter_subsection("Geoid");
         {
-          include_surface_topo_contribution = prm.get_bool ("Include surface topography contribution");
-          include_CMB_topo_contribution = prm.get_bool ("Include CMB topography contribution");
-          max_degree = prm.get_integer ("Maximum degree");
-          min_degree = prm.get_integer ("Minimum degree");
+          include_surface_topography_contribution = prm.get_bool ("Include surface topography contribution");
+          include_cmb_topography_contribution = prm.get_bool ("Include CMB topography contribution");
+          maximum_degree = prm.get_integer ("Maximum degree");
+          minimum_degree = prm.get_integer ("Minimum degree");
           output_in_lat_lon = prm.get_bool ("Output data in geographical coordinates");
           density_above = prm.get_double ("Density above");
           density_below = prm.get_double ("Density below");
-          output_geoid_anomaly_SH_coes = prm.get_bool ("Output geoid anomaly coefficients");
-          output_surface_topo_contribution_SH_coes = prm.get_bool ("Output surface topography contribution coefficients");
-          output_CMB_topo_contribution_SH_coes = prm.get_bool ("Output CMB topography contribution coefficients");
-          output_density_anomaly_contribution_SH_coes = prm.get_bool ("Output density anomaly contribution coefficients");
+          output_geoid_anomaly_coefficients = prm.get_bool ("Output geoid anomaly coefficients");
+          output_surface_topography_contribution_coefficients = prm.get_bool ("Output surface topography contribution coefficients");
+          output_cmb_topography_contribution_coefficients = prm.get_bool ("Output CMB topography contribution coefficients");
+          output_density_anomaly_contribution_coefficients = prm.get_bool ("Output density anomaly contribution coefficients");
           output_gravity_anomaly = prm.get_bool ("Output gravity anomaly");
         }
         prm.leave_subsection ();
@@ -1024,7 +835,7 @@ namespace aspect
     Geoid<dim>::initialize ()
     {
       // Find if the included boundaries are active free surfaces
-      if (include_surface_topo_contribution == true || include_CMB_topo_contribution == true)
+      if (include_surface_topography_contribution == true || include_cmb_topography_contribution == true)
         {
           if (this->get_parameters().mesh_deformation_enabled == true)
             {
@@ -1034,7 +845,7 @@ namespace aspect
               const std::set<types::boundary_id> mesh_deformation_boundaries = this->get_mesh_deformation_handler().get_active_mesh_deformation_boundary_indicators();
 
               use_free_surface_topography = mesh_deformation_boundaries.find(surface_id) != mesh_deformation_boundaries.end();
-              use_free_CMB_topography = mesh_deformation_boundaries.find(bottom_id) != mesh_deformation_boundaries.end();
+              use_free_cmb_topography = mesh_deformation_boundaries.find(bottom_id) != mesh_deformation_boundaries.end();
             }
         }
     }

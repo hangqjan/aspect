@@ -75,6 +75,7 @@ DEAL_II_ENABLE_EXTRA_DIAGNOSTICS
 
 #include <memory>
 #include <thread>
+#include <ctime>
 
 namespace WorldBuilder
 {
@@ -139,8 +140,16 @@ namespace aspect
 
   namespace Adjoint
   {
+    struct ReplayStepMetadata;
     template <int dim>      class KernelRepository;
     template <int dim>      class Manager;
+    template <int dim>      class ScopedSimulatorState;
+    template <int dim>      class StokesAdjointSolver;
+    template <int dim>      class InstantaneousStokesWorkflow;
+    template <int dim>      class TimeDependentWorkflow;
+    template <int dim>      class TrajectoryManager;
+    template <int dim>      class AdvectionAdjointCalculator;
+    template <int dim>      class ArtificialViscosityAdjoint;
   }
 
   struct DefectCorrectionResiduals
@@ -254,6 +263,9 @@ namespace aspect
        * <code>source/simulator/core.cc</code>.
        */
       void run ();
+
+      /** Return the initialized adjoint manager for focused in-process diagnostics. */
+      Adjoint::Manager<dim> &get_adjoint_manager ();
 
       /**
        * Write a connection graph of all of the plugins we know about, in the
@@ -444,6 +456,25 @@ namespace aspect
        * <code>source/simulator/core.cc</code>.
        */
       void solve_timestep ();
+
+      /**
+       * Advance one already accepted primal step for the adjoint trajectory
+       * replay diagnostic. This intentionally reuses advance_time(),
+       * start_timestep(), and solve_timestep(), but never consults the
+       * time-step manager or generic run-loop actions.
+       */
+      void replay_accepted_timestep (const Adjoint::ReplayStepMetadata &metadata);
+
+      /**
+       * Execute the accepted forward-time loop. Return true when initial
+       * adaptive refinement requires the caller to reconstruct the initial
+       * state and enter the loop again. In-memory optimization evaluations
+       * set @p suppress_evaluation_side_effects to avoid ordinary output,
+       * checkpoints, and mesh changes.
+       */
+      bool run_forward_time_loop (unsigned int &max_refinement_level,
+                                  std::time_t &last_checkpoint_time,
+                                  const bool suppress_evaluation_side_effects);
 
       /**
        * This function implements one scheme for the various
@@ -1949,6 +1980,9 @@ namespace aspect
        * @{
        */
       TimeStepping::Manager<dim>                                time_stepping_manager;
+
+      /** True only while the narrow accepted-step replay primitive is active. */
+      bool                                                       replaying_accepted_timestep = false;
       /**
        * @}
        */
@@ -2076,6 +2110,22 @@ namespace aspect
 
       LinearAlgebra::BlockVector                                current_linearization_point;
 
+      /**
+       * Cellwise artificial viscosity used by the most recent advection
+       * system assembly. The vector is indexed by active cell index and is
+       * updated immediately after get_artificial_viscosity() returns.
+       */
+      Vector<double>                                             last_advection_artificial_viscosity_per_cell;
+
+      /**
+       * Cellwise minimum and maximum physical diffusion coefficient used by
+       * the most recent advection system assembly. These vectors are indexed
+       * by active cell index and allow adjoint code to reproduce the active
+       * branch of max(k, nu_art) without re-entering the material model.
+       */
+      Vector<double>                                             last_advection_physical_diffusion_min_per_cell;
+      Vector<double>                                             last_advection_physical_diffusion_max_per_cell;
+
       // only used if is_compressible()
       LinearAlgebra::BlockVector                                pressure_shape_function_integrals;
 
@@ -2151,6 +2201,13 @@ namespace aspect
       friend class boost::serialization::access;
       friend class SimulatorAccess<dim>;
       friend class Adjoint::Manager<dim>;
+      friend class Adjoint::ScopedSimulatorState<dim>;
+      friend class Adjoint::StokesAdjointSolver<dim>;
+      friend class Adjoint::InstantaneousStokesWorkflow<dim>;
+      friend class Adjoint::TimeDependentWorkflow<dim>;
+      friend class Adjoint::TrajectoryManager<dim>;
+      friend class Adjoint::AdvectionAdjointCalculator<dim>;
+      friend class Adjoint::ArtificialViscosityAdjoint<dim>;
       friend class MeshDeformation::MeshDeformationHandler<dim>;
       friend class VolumeOfFluidHandler<dim>;
       friend class StokesMatrixFreeHandler<dim>;

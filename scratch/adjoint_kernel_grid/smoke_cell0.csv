@@ -1,0 +1,2 @@
+control,active_cell_index,cell_volume,step,objective_minus,objective_plus,finite_difference,adjoint,absolute_error,relative_error
+viscosity,0,4921874999.999998,1e+18,1824230799294.195,1824230790632.457,-4.330869018554687e-15,-1.90135575008486e-14,1.4682688482293912e-14,0.7722220569001148

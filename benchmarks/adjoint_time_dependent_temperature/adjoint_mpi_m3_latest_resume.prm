@@ -1,0 +1,11 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_m3_latest_failure.prm
+
+set Resume computation = auto
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Checkpoint transaction failure injection = none
+    set Checkpoint transaction failure next reverse step = -1
+  end
+end

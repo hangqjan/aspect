@@ -37,7 +37,7 @@
 #endif
 
 #include <aspect/simulator/assemblers/interface.h>
-#include <aspect/adjoint/manager.h>
+#include <aspect/adjoint/core/manager.h>
 #include <aspect/geometry_model/initial_topography_model/zero_topography.h>
 #include <aspect/material_model/rheology/elasticity.h>
 #include <aspect/time_stepping/repeat_on_nonlinear_fail.h>
@@ -70,6 +70,7 @@
 #include <deal.II/distributed/grid_refinement.h>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <locale>
@@ -650,20 +651,23 @@ namespace aspect
       const char *unit = (parameters.convert_to_years ? "years" : "seconds");
       const double multiplier = (parameters.convert_to_years ? 1./year_in_seconds : 1.0);
 
-      pcout << "*** Timestep " << timestep_number
-            << ":  t=" << (time * multiplier) << ' ' << unit
-            << ", dt=" << (time_step * multiplier) << ' ' << unit
-            << std::endl;
+      if (!replaying_accepted_timestep)
+        pcout << "*** Timestep " << timestep_number
+              << ":  t=" << (time * multiplier) << ' ' << unit
+              << ", dt=" << (time_step * multiplier) << ' ' << unit
+              << std::endl;
     }
 
     nonlinear_iteration = 0;
 
-    signals.start_timestep(*this);
+    if (!replaying_accepted_timestep)
+      signals.start_timestep(*this);
 
     // Copy particle handler to restore particle location and properties
     // before repeating a timestep
-    for (auto &particle_manager : particle_managers)
-      particle_manager.backup_particles();
+    if (!replaying_accepted_timestep)
+      for (auto &particle_manager : particle_managers)
+        particle_manager.backup_particles();
 
 
     // then interpolate the current boundary velocities. copy constraints
@@ -699,8 +703,9 @@ namespace aspect
     if (prescribed_stokes_solution.get())
       prescribed_stokes_solution->update();
 
-    for (auto &particle_manager : particle_managers)
-      particle_manager.update();
+    if (!replaying_accepted_timestep)
+      for (auto &particle_manager : particle_managers)
+        particle_manager.update();
 
     // do the same for the traction boundary conditions and other things
     // that end up in the bilinear form. we update those that end up in
@@ -891,6 +896,7 @@ namespace aspect
         {
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_no_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_single_Stokes:
+          case Parameters<dim>::NonlinearSolver::Kind::single_Advection_single_Stokes_adjoint_temperature:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_defect_correction_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_Newton_Stokes:
@@ -926,6 +932,7 @@ namespace aspect
           case Parameters<dim>::NonlinearSolver::Kind::no_Advection_iterated_defect_correction_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::no_Advection_adjoint_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_single_Stokes:
+          case Parameters<dim>::NonlinearSolver::Kind::single_Advection_single_Stokes_adjoint_temperature:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_defect_correction_Stokes:
           case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_Newton_Stokes:
@@ -2034,6 +2041,7 @@ namespace aspect
             }
 
             case NonlinearSolver::single_Advection_single_Stokes:
+            case NonlinearSolver::single_Advection_single_Stokes_adjoint_temperature:
             {
               solve_single_advection_single_stokes();
               break;
@@ -2133,6 +2141,190 @@ namespace aspect
               AssertThrow(false, ExcNotImplemented());
           }
       }
+  }
+
+
+
+  template <int dim>
+  void
+  Simulator<dim>::replay_accepted_timestep(const Adjoint::ReplayStepMetadata &metadata)
+  {
+    AssertThrow(!replaying_accepted_timestep,
+                ExcMessage("Nested accepted-step trajectory replay is not supported."));
+    AssertThrow(metadata.has_outgoing_step && metadata.outgoing_time_step > 0.0,
+                ExcMessage("Trajectory replay requires a recorded accepted outgoing time step."));
+    const auto equal_time = [](const double left, const double right)
+    {
+      return std::abs(left - right)
+             <= 64.0 * std::numeric_limits<double>::epsilon()
+             * std::max({1.0, std::abs(left), std::abs(right)});
+    };
+    AssertThrow(timestep_number == metadata.step
+                && equal_time(time, metadata.time)
+                && equal_time(time_step, metadata.time_step)
+                && equal_time(old_time_step, metadata.old_time_step),
+                ExcMessage("The simulator state does not match the recorded accepted-step replay schedule."));
+
+    replaying_accepted_timestep = true;
+    try
+      {
+        // Do not call TimeStepping::Manager::update() here. The recorded
+        // outgoing step is the sole authority for this primal transition.
+        advance_time(metadata.outgoing_time_step);
+        start_timestep();
+        solve_timestep();
+      }
+    catch (...)
+      {
+        replaying_accepted_timestep = false;
+        throw;
+      }
+    replaying_accepted_timestep = false;
+  }
+
+
+  template <int dim>
+  Adjoint::Manager<dim> &
+  Simulator<dim>::get_adjoint_manager()
+  {
+    AssertThrow(adjoint_manager != nullptr,
+                ExcMessage("This simulation has no initialized adjoint manager."));
+    return *adjoint_manager;
+  }
+
+
+  template <int dim>
+  bool
+  Simulator<dim>::run_forward_time_loop(unsigned int &max_refinement_level,
+                                        std::time_t &last_checkpoint_time,
+                                        const bool suppress_evaluation_side_effects)
+  {
+    do
+      {
+        // During pre-refinement, do not solve if we are asked to skip it:
+        if (! (parameters.skip_solvers_on_initial_refinement
+               && pre_refinement_step < parameters.initial_adaptive_refinement))
+          {
+            start_timestep ();
+
+            // then do the core work: assemble systems and solve
+            solve_timestep ();
+          }
+
+        // See if we have to start over with a new adaptive refinement cycle
+        // at the beginning of the simulation. The caller must reset the
+        // initialization status before reconstructing the initial state.
+        if (timestep_number == 0)
+          {
+            const bool initial_refinement_done = maybe_do_initial_refinement(max_refinement_level);
+            if (initial_refinement_done)
+              return true;
+          }
+
+        // We're now definitely past the point where we need the initial
+        // conditions objects, and we can release the pointers to these objects
+        // that we have created in the constructor of this class. If some of the
+        // other plugins created there still need access to these initial
+        // conditions, they will have created their own shared pointers.
+        if (!suppress_evaluation_side_effects)
+          {
+            initial_temperature_manager.reset();
+            initial_composition_manager.reset();
+#ifdef ASPECT_WITH_WORLD_BUILDER
+            // The same applies to the world builder object:
+            world_builder.reset();
+#endif
+          }
+
+        // Prepare the next time step:
+        time_stepping_manager.update();
+
+        const double new_time_step_size = time_stepping_manager.get_next_time_step_size();
+
+        // if we postprocess nonlinear iterations, this function is called within
+        // solve_timestep () in the individual solver schemes
+        if (!suppress_evaluation_side_effects
+            && !time_stepping_manager.should_repeat_time_step()
+            && !parameters.run_postprocessors_on_nonlinear_iterations)
+          postprocess ();
+
+        if (!time_stepping_manager.should_repeat_time_step()
+            && adjoint_manager != nullptr
+            && adjoint_manager->time_dependent_temperature_workflow_enabled())
+          adjoint_manager->record_forward_snapshot(new_time_step_size,
+                                                   true);
+
+        // In-memory optimization evaluations keep the mesh and particles
+        // fixed. O3 validates this before entering the reusable loop; retain
+        // a local assertion so a new caller cannot silently violate it.
+        AssertThrow(!suppress_evaluation_side_effects
+                    || (!time_stepping_manager.should_refine_mesh()
+                        && particle_managers.empty()),
+                    ExcMessage("Reusable in-memory forward evaluations require a fixed mesh and no particles."));
+
+        // if the time stepping manager tells us to refine the mesh,
+        // we need to do this before going to the next time step
+        if (time_stepping_manager.should_refine_mesh())
+          {
+            pcout << "Refining the mesh based on the time stepping manager ...\\n" << std::endl;
+            refine_mesh(max_refinement_level);
+          }
+
+        if (time_stepping_manager.should_repeat_time_step())
+          {
+            pcout << "Repeating the current time step based on the time stepping manager ...\\n" << std::endl;
+
+            if (mesh_deformation)
+              mesh_deformation->mesh_displacements = mesh_deformation->old_mesh_displacements;
+
+            // adjust time and time_step size:
+            time = time - time_step + new_time_step_size;
+            time_step = new_time_step_size;
+
+            // Restore particles through stored copy of particle handler,
+            // created in start_timestep(),
+            // but only if this timestep is to be repeated.
+            for (auto &particle_manager : particle_managers)
+              particle_manager.restore_particles();
+
+            continue; // repeat time step loop
+          }
+
+        if (!suppress_evaluation_side_effects
+            && !time_stepping_manager.should_refine_mesh())
+          maybe_refine_mesh(new_time_step_size, max_refinement_level);
+
+        // see if we want to write a timing summary
+        if (!suppress_evaluation_side_effects)
+          maybe_write_timing_output();
+
+        // update values for timestep, increment time step by one.
+        advance_time(new_time_step_size);
+
+        // Check whether to terminate the simulation:
+        const bool should_terminate = time_stepping_manager.should_simulation_terminate_now();
+        if (should_terminate
+            && adjoint_manager != nullptr
+            && adjoint_manager->time_dependent_temperature_workflow_enabled())
+          adjoint_manager->mark_forward_snapshot_terminal();
+
+        const bool write_checkpoint_due_to_termination
+          = should_terminate && time_stepping_manager.need_checkpoint_on_terminate();
+
+        const bool checkpoint_written =
+          suppress_evaluation_side_effects ? false
+          : maybe_write_checkpoint(last_checkpoint_time,
+                                   write_checkpoint_due_to_termination);
+
+        if (checkpoint_written)
+          last_checkpoint_time = std::time(nullptr);
+
+        if (should_terminate)
+          break;
+      }
+    while (true);
+
+    return false;
   }
 
 
@@ -2237,108 +2429,40 @@ namespace aspect
     // Start the principal loop over time steps. At this point, everything
     // is completely initialized, so set that status as well
     simulator_is_past_initialization = true;
-    do
-      {
-        // During pre-refinement, do not solve if we are asked to skip it:
-        if (! (parameters.skip_solvers_on_initial_refinement
-               && pre_refinement_step < parameters.initial_adaptive_refinement))
-          {
-            start_timestep ();
 
-            // then do the core work: assemble systems and solve
-            solve_timestep ();
-          }
+    // Keep an in-memory canonical state at the exact boundary between initial
+    // condition construction and the first forward step. O3 restores this
+    // state before installing a new initial-temperature control; it never
+    // relies on the initial-temperature plugin after this point.
+    if (adjoint_manager != nullptr
+        && adjoint_manager->time_dependent_temperature_workflow_enabled()
+        && pre_refinement_step == parameters.initial_adaptive_refinement
+        && !adjoint_manager->has_optimization_initial_state())
+      adjoint_manager->capture_optimization_initial_state();
 
-        // See if we have to start over with a new adaptive refinement cycle
-        // at the beginning of the simulation. If so, set the
-        // simulator_is_past_initialization variable back to false because we will
-        // have to re-initialize some variables such as the size of vectors,
-        // the initial state, etc.
-        if (timestep_number == 0)
-          {
-            const bool initial_refinement_done = maybe_do_initial_refinement(max_refinement_level);
-            if (initial_refinement_done)
-              {
-                simulator_is_past_initialization = false;
-                goto start_time_iteration;
-              }
-          }
+    // A reverse checkpoint is semantically independent of an ordinary forward
+    // restart snapshot. Once it has been committed, continuing the forward
+    // loop would append new trajectory records to a completed run. Resume the
+    // reverse phase directly instead.
+    const bool resume_adjoint_reverse =
+      parameters.resume_computation
+      && adjoint_manager != nullptr
+      && adjoint_manager->has_pending_adjoint_restart();
+    if (!resume_adjoint_reverse)
+      if (run_forward_time_loop(max_refinement_level,
+                                last_checkpoint_time,
+                                false))
+        {
+          simulator_is_past_initialization = false;
+          goto start_time_iteration;
+        }
 
-        // We're now definitely past the point where we need the initial
-        // conditions objects, and we can release the pointers to these objects
-        // that we have created in the constructor of this class. If some of the
-        // other plugins created there still need access to these initial
-        // conditions, they will have created their own shared pointers.
-        initial_temperature_manager.reset();
-        initial_composition_manager.reset();
-#ifdef ASPECT_WITH_WORLD_BUILDER
-        // The same applies to the world builder object:
-        world_builder.reset();
-#endif
-        // Prepare the next time step:
-        time_stepping_manager.update();
-
-        const double new_time_step_size = time_stepping_manager.get_next_time_step_size();
-
-        // if we postprocess nonlinear iterations, this function is called within
-        // solve_timestep () in the individual solver schemes
-        if (!time_stepping_manager.should_repeat_time_step()
-            && !parameters.run_postprocessors_on_nonlinear_iterations)
-          postprocess ();
-
-        // if the time stepping manager tells us to refine the mesh,
-        // we need to do this before going to the next time step
-        if (time_stepping_manager.should_refine_mesh())
-          {
-            pcout << "Refining the mesh based on the time stepping manager ...\n" << std::endl;
-            refine_mesh(max_refinement_level);
-          }
-
-        if (time_stepping_manager.should_repeat_time_step())
-          {
-            pcout << "Repeating the current time step based on the time stepping manager ...\n" << std::endl;
-
-            if (mesh_deformation)
-              mesh_deformation->mesh_displacements = mesh_deformation->old_mesh_displacements;
-
-            // adjust time and time_step size:
-            time = time - time_step + new_time_step_size;
-            time_step = new_time_step_size;
-
-            // Restore particles through stored copy of particle handler,
-            // created in start_timestep(),
-            // but only if this timestep is to be repeated.
-            for (auto &particle_manager : particle_managers)
-              particle_manager.restore_particles();
-
-            continue; // repeat time step loop
-          }
-
-        if (!time_stepping_manager.should_refine_mesh())
-          maybe_refine_mesh(new_time_step_size, max_refinement_level);
-
-        // see if we want to write a timing summary
-        maybe_write_timing_output();
-
-        // update values for timestep, increment time step by one.
-        advance_time(new_time_step_size);
-
-        // Check whether to terminate the simulation:
-        const bool should_terminate = time_stepping_manager.should_simulation_terminate_now();
-
-        const bool write_checkpoint_due_to_termination
-          = should_terminate && time_stepping_manager.need_checkpoint_on_terminate();
-
-        const bool checkpoint_written = maybe_write_checkpoint(last_checkpoint_time,
-                                                               write_checkpoint_due_to_termination);
-
-        if (checkpoint_written)
-          last_checkpoint_time = std::time(nullptr);
-
-        if (should_terminate)
-          break;
-      }
-    while (true);
+    if (adjoint_manager != nullptr
+        && adjoint_manager->time_dependent_temperature_workflow_enabled())
+      if (adjoint_manager->optimization_enabled())
+        adjoint_manager->run_initial_temperature_optimization();
+      else
+        adjoint_manager->finalize_time_dependent_temperature();
 
     // we disable automatic summary printing so that it won't happen when
     // throwing an exception. Therefore, we have to do this manually here:
@@ -2387,7 +2511,14 @@ namespace aspect
 
     CitationInfo::print_info_block (pcout);
 
-    stokes_matrix_free.reset();
+    // O3 re-enters the accepted forward loop in this same Simulator after the
+    // ordinary run has captured its canonical initial state. The GMG solver
+    // owns runtime data needed by that second loop, so keep it alive for this
+    // explicitly in-memory workflow. All other runs retain the usual eager
+    // release at the end of run().
+    if (adjoint_manager == nullptr
+        || !adjoint_manager->time_dependent_temperature_workflow_enabled())
+      stokes_matrix_free.reset();
   }
 }
 
@@ -2452,6 +2583,17 @@ namespace aspect
   template \
   void \
   Simulator<dim>::solve_timestep (); \
+  template \
+  void \
+  Simulator<dim>::replay_accepted_timestep(const Adjoint::ReplayStepMetadata &); \
+  \
+  template \
+  Adjoint::Manager<dim> & \
+  Simulator<dim>::get_adjoint_manager(); \
+  \
+  template \
+  bool \
+  Simulator<dim>::run_forward_time_loop(unsigned int &, std::time_t &, const bool); \
   \
   template \
   void \

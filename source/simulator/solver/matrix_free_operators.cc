@@ -28,6 +28,10 @@
 
 #include <deal.II/base/signaling_nan.h>
 
+#include <iostream>
+#include <limits>
+#include <cmath>
+
 #include <deal.II/dofs/dof_renumbering.h>
 #include <deal.II/dofs/dof_accessor.h>
 #include <deal.II/dofs/dof_tools.h>
@@ -532,7 +536,10 @@ namespace aspect
   template <int dim, int degree_p, typename number>
   MatrixFreeStokesOperators::MassMatrixOperator<dim,degree_p,number>::MassMatrixOperator ()
     :
-    MatrixFreeOperators::Base<dim, dealii::LinearAlgebra::distributed::Vector<number>>()
+    MatrixFreeOperators::Base<dim, dealii::LinearAlgebra::distributed::Vector<number>>(),
+    diagnostic_label("pressure-mass"),
+    diagnostic_level(numbers::invalid_unsigned_int),
+    diagnostic_enabled(false)
   {}
 
 
@@ -582,6 +589,20 @@ namespace aspect
   set_cell_data (const OperatorCellData<dim,number> &data)
   {
     this->cell_data = &data;
+  }
+
+
+
+  template <int dim, int degree_p, typename number>
+  void
+  MatrixFreeStokesOperators::MassMatrixOperator<dim,degree_p,number>::
+  set_diagnostic_context(const std::string &label,
+                         const unsigned int level,
+                         const bool enabled)
+  {
+    diagnostic_label = label;
+    diagnostic_level = level;
+    diagnostic_enabled = enabled;
   }
 
 
@@ -695,6 +716,49 @@ namespace aspect
 
     this->set_constrained_entries_to_one(diagonal);
     inverse_diagonal = diagonal;
+
+    // Diagnose before asserting so a cold-rebuild failure names its exact
+    // matrix-free pressure component, MG level, and first bad DoF.
+    unsigned int local_index = 0;
+    std::size_t nonpositive_entries = 0;
+    std::size_t nonfinite_entries = 0;
+    number minimum_positive_entry = std::numeric_limits<number>::max();
+    types::global_dof_index first_nonpositive_entry = numbers::invalid_dof_index;
+    for (const auto &local_element : inverse_diagonal)
+      {
+        if (!std::isfinite(local_element))
+          {
+            ++nonfinite_entries;
+            if (first_nonpositive_entry == numbers::invalid_dof_index)
+              first_nonpositive_entry =
+                inverse_diagonal.locally_owned_elements().nth_index_in_set(local_index);
+          }
+        else if (local_element <= 0.)
+          {
+            ++nonpositive_entries;
+            if (first_nonpositive_entry == numbers::invalid_dof_index)
+              first_nonpositive_entry =
+                inverse_diagonal.locally_owned_elements().nth_index_in_set(local_index);
+          }
+        else
+          minimum_positive_entry = std::min(minimum_positive_entry, local_element);
+        ++local_index;
+      }
+
+    if (diagnostic_enabled)
+      std::cerr << "ASPECT_MF_MASS_DIAGONAL"
+                << " context=" << diagnostic_label
+                << " level=" << diagnostic_level
+                << " component=pressure"
+                << " degree=" << degree_p
+                << " locally_owned=" << inverse_diagonal.locally_owned_size()
+                << " nonpositive=" << nonpositive_entries
+                << " nonfinite=" << nonfinite_entries
+                << " min_positive="
+                << (minimum_positive_entry == std::numeric_limits<number>::max()
+                    ? number(-1) : minimum_positive_entry)
+                << " first_nonpositive_dof=" << first_nonpositive_entry
+                << std::endl;
 
     // Finally loop over all of the computed diagonal elements and invert them.
     // The following loop relies on the fact that inverse_diagonal.begin()/end()

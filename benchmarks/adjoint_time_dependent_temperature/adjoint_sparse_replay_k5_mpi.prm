@@ -1,0 +1,4 @@
+# Two-rank counterpart of the Phase-B K=5 sparse-anchor validation.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5.prm
+
+set Output directory = output-adjoint-sparse-replay-k5-mpi

@@ -72,6 +72,7 @@ namespace aspect
         no_Advection_adjoint_Stokes,
         single_Advection_no_Stokes,
         single_Advection_single_Stokes,
+        single_Advection_single_Stokes_adjoint_temperature,
         single_Advection_iterated_Stokes,
         single_Advection_iterated_defect_correction_Stokes,
         single_Advection_iterated_Newton_Stokes,

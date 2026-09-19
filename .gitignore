@@ -10,6 +10,7 @@
 /compile_commands.json
 /.vscode/
 /.cache/
+/.matplotlib-cache/
 **/.DS_Store
 /AspectConfig.cmake
 /CMakeLists.txt.user*

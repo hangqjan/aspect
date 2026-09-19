@@ -1,0 +1,24 @@
+# Temperature-control benchmark for cp(T) through active temperature
+# entropy-viscosity material-prefactor paths. Density temperature dependence is
+# disabled to isolate cp(T).
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/plugin/libadjoint_material_model.so
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_advection_dominated.prm
+
+set Output directory = output-adjoint-temperature-cp-t-ev
+
+subsection Material model
+  set Model name = adjoint material model
+
+  subsection Adjoint material model
+    set Reference density = 1
+    set Reference specific heat = 1
+    set Reference temperature = 0
+    set Thermal expansion coefficient = 0
+    set Specific heat temperature coefficient = 2e-3
+    set Density differential for compositional field 1 = 0
+    set Viscosity = 1
+    set Thermal conductivity = 1e-6
+  end
+end

@@ -57,6 +57,7 @@ namespace aspect
               return true;
 
             case Parameters<dim>::NonlinearSolver::Kind::single_Advection_single_Stokes:
+            case Parameters<dim>::NonlinearSolver::Kind::single_Advection_single_Stokes_adjoint_temperature:
             case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_Stokes:
             case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_defect_correction_Stokes:
             case Parameters<dim>::NonlinearSolver::Kind::single_Advection_iterated_Newton_Stokes:

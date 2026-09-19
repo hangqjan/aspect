@@ -1,0 +1,3650 @@
+// Consolidated adjoint module: optimization
+// Each section begins with its original repository path.
+
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/optimization/initial_temperature_control.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+*/
+
+#ifndef _aspect_adjoint_optimization_initial_temperature_control_h
+#define _aspect_adjoint_optimization_initial_temperature_control_h
+
+#include <aspect/global.h>
+#include <aspect/linear_algebra_types.h>
+
+#include <deal.II/dofs/dof_handler.h>
+#include <deal.II/lac/affine_constraints.h>
+#include <deal.II/lac/solver_control.h>
+
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * Fixed initial-temperature control space for a single ASPECT temperature
+     * component.  Its coordinates are global DoF numbers in the simulator's
+     * component-wise DoFHandler numbering, not a separate discretisation.
+     *
+     * The authoritative convention is
+     * \f[T=T_{fixed}+Pm,\quad \delta T=P\delta m,\quad
+     * g_c=P^Tg_{raw},\quad M_c=P^TM_TP.\f]
+     * Thus the ROL gradient is the primal L2 Riesz representative satisfying
+     * \f[M_cg_{L2}=g_c\f].
+     */
+    template <int dim>
+    class InitialTemperatureControl
+    {
+      public:
+        using Expansion = std::vector<std::pair<types::global_dof_index, double>>;
+
+        InitialTemperatureControl(const dealii::DoFHandler<dim> &dof_handler,
+                                  const dealii::ComponentMask &temperature_mask,
+                                  const dealii::AffineConstraints<double> &constraints,
+                                  const MPI_Comm communicator);
+
+        InitialTemperatureControl(const dealii::DoFHandler<dim> &dof_handler,
+                                  const dealii::ComponentMask &temperature_mask,
+                                  const dealii::AffineConstraints<double> &constraints,
+                                  const MPI_Comm communicator,
+                                  const types::global_dof_index temperature_block_first_dof,
+                                  const dealii::IndexSet &temperature_block_owned,
+                                  const dealii::IndexSet &temperature_block_relevant);
+
+        const dealii::IndexSet &locally_owned_control_dofs() const;
+        const dealii::IndexSet &locally_relevant_control_dofs() const;
+        const dealii::IndexSet &temperature_block_owned_dofs() const;
+        const dealii::IndexSet &temperature_block_relevant_dofs() const;
+        void assert_temperature_block_mapping() const;
+        types::global_dof_index n_control_dofs() const;
+
+        /**
+         * Inject the homogeneous perturbation Pm into an owned temperature
+         * block. P contains free rows and hanging-node interpolation rows;
+         * Dirichlet rows are zero so an optimization step cannot alter a
+         * prescribed temperature boundary.
+         */
+        void inject_perturbation(const LinearAlgebra::Vector &control,
+                                 LinearAlgebra::Vector &temperature) const;
+
+        /**
+         * Inject the physical state T_fixed + Pm. The fixed field carries
+         * inhomogeneous boundary values, while Pm is strictly homogeneous.
+         * Keeping these two pieces separate makes bounds and adjoints refer
+         * to the same control convention.
+         */
+        void inject_physical(const LinearAlgebra::Vector &control,
+                             const LinearAlgebra::Vector &fixed_temperature,
+                             LinearAlgebra::Vector &temperature) const;
+
+        /**
+         * Restrict a temperature coefficient covector exactly as g_c=P^T
+         * g_raw. This is a transpose operation, not interpolation: each
+         * hanging-node contribution is accumulated into its free masters.
+         */
+        void restrict_covector(const LinearAlgebra::Vector &raw_covector,
+                               LinearAlgebra::Vector &control_covector) const;
+
+        /**
+         * Assemble and cache M_c=P^T M_T P. This sparse distributed matrix
+         * defines the L2 inner product in reduced coordinates and must never
+         * be replaced by a dense control-space matrix.
+         */
+        void assemble_mass_matrix(const dealii::Mapping<dim> &mapping,
+                                  const dealii::Quadrature<dim> &quadrature);
+
+        std::shared_ptr<const LinearAlgebra::SparseMatrix> mass_matrix() const;
+
+        /** Solve M_c result=rhs using the cached Jacobi preconditioner. */
+        void solve_l2_riesz(const LinearAlgebra::Vector &rhs,
+                            LinearAlgebra::Vector &result,
+                            const double relative_tolerance = 1e-12) const;
+
+        /** The homogeneous row of P belonging to a temperature DoF. */
+        Expansion expansion(const types::global_dof_index temperature_dof) const;
+
+      private:
+        void assert_control_layout(const LinearAlgebra::Vector &control) const;
+        void assert_temperature_layout(const LinearAlgebra::Vector &temperature) const;
+        void build_homogeneous_constraints();
+        types::global_dof_index temperature_block_index(const types::global_dof_index dof) const;
+        Expansion expand(const types::global_dof_index dof) const;
+
+        const dealii::DoFHandler<dim> &dof_handler;
+        const dealii::ComponentMask temperature_mask;
+        const dealii::AffineConstraints<double> &constraints;
+        const MPI_Comm communicator;
+        const types::global_dof_index temperature_block_first_dof;
+        dealii::IndexSet locally_owned_temperature_dofs;
+        dealii::IndexSet locally_relevant_temperature_dofs;
+        dealii::IndexSet locally_owned_temperature_block_dofs;
+        dealii::IndexSet locally_relevant_temperature_block_dofs;
+        dealii::IndexSet locally_owned_controls;
+        dealii::IndexSet locally_relevant_controls;
+        std::map<types::global_dof_index, types::global_dof_index> full_to_reduced;
+        dealii::AffineConstraints<double> homogeneous_constraints;
+        dealii::AffineConstraints<double> physical_constraints;
+        std::shared_ptr<LinearAlgebra::SparseMatrix> reduced_mass_matrix;
+        std::shared_ptr<LinearAlgebra::PreconditionJacobi> mass_preconditioner;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/optimization/initial_temperature_control.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/optimization/initial_temperature_optimization.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#ifndef _aspect_adjoint_optimization_initial_temperature_optimization_h
+#define _aspect_adjoint_optimization_initial_temperature_optimization_h
+
+#include <aspect/adjoint/optimization/initial_temperature_control.h>
+#include <aspect/simulator_access.h>
+
+#include <deal.II/base/parameter_handler.h>
+
+#include <memory>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim> class Manager;
+
+    /**
+     * Own the configuration and ROL lifecycle of reduced
+     * initial-temperature optimization.
+     *
+     * The simulator-facing adjoint manager remains the evaluation adapter: it
+     * restores the canonical forward state and supplies value/gradient pairs.
+     * This class owns everything specific to the optimization algorithm,
+     * including bound construction, Lin--More/L-BFGS setup, callback
+     * accounting, and the optional independent final-gradient qualification.
+     * Consequently, changing the optimizer does not affect the reverse-time
+     * workflow or trajectory implementation.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class InitialTemperatureOptimization : public SimulatorAccess<dim>
+    {
+      public:
+        /** Declare the solve-mode and optimization parameters. */
+        static void declare_parameters(ParameterHandler &prm);
+
+        /** Parse and validate the optimization configuration. */
+        void parse_parameters(ParameterHandler &prm);
+
+        /** Return whether reduced initial-temperature optimization is active. */
+        bool enabled() const;
+
+        /** Run one complete ROL optimization through @p adjoint_manager. */
+        void run(Manager<dim> &adjoint_manager) const;
+
+      private:
+        friend class Manager<dim>;
+
+        /** Complete pre-forward state restored before every trial control. */
+        struct CanonicalState
+        {
+          LinearAlgebra::BlockVector solution;
+          LinearAlgebra::BlockVector old_solution;
+          LinearAlgebra::BlockVector old_old_solution;
+          LinearAlgebra::BlockVector current_linearization_point;
+          LinearAlgebra::BlockVector system_right_hand_side;
+          AffineConstraints<double> current_constraints;
+          double time = 0.0;
+          double time_step = 0.0;
+          double old_time_step = 0.0;
+          double pressure_normalization_adjustment = 0.0;
+          double pressure_scaling = 0.0;
+          unsigned int timestep_number = 0;
+          unsigned int nonlinear_iteration = 0;
+          unsigned int nonlinear_solver_failures = 0;
+          unsigned int linear_solver_failures = 0;
+          bool rebuild_sparsity_and_matrices = false;
+          bool rebuild_stokes_matrix = false;
+          bool rebuild_stokes_preconditioner = false;
+          bool captured = false;
+        };
+
+        CanonicalState canonical_state;
+        std::unique_ptr<InitialTemperatureControl<dim>> control_space;
+        std::unique_ptr<LinearAlgebra::Vector> fixed_temperature;
+
+        bool optimization_enabled = false;
+        unsigned int maximum_iterations = 1;
+        double gradient_tolerance = 1e-8;
+        double step_tolerance = 1e-12;
+        double initial_trust_region_radius = 1e-3;
+        unsigned int lbfgs_history_size = 3;
+        double lower_bound = -1e-2;
+        double upper_bound = 1e-2;
+        unsigned int output_verbosity = 0;
+        bool use_physical_temperature_bounds = false;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/optimization/initial_temperature_optimization.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/optimization/optimization_parameters.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify it under the
+  terms of the GNU General Public License as published by the Free Software
+  Foundation; either version 2, or (at your option) any later version.
+*/
+
+#ifndef _aspect_adjoint_optimization_optimization_parameters_h
+#define _aspect_adjoint_optimization_optimization_parameters_h
+
+#include <stdexcept>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * Validate the scalar and cross-parameter contracts for the native ROL
+     * initial-temperature optimizer. This helper deliberately has no MPI,
+     * Simulator, or ROL dependency, so the production validation contracts can
+     * be tested locally without entering ASPECT's top-level MPI abort path.
+     */
+    inline void
+    validate_initial_temperature_optimization_parameters(
+      const unsigned int lbfgs_history_size,
+      const double gradient_tolerance,
+      const double step_tolerance,
+      const double initial_trust_region_radius,
+      const double lower_bound,
+      const double upper_bound)
+    {
+      if (lbfgs_history_size == 0)
+        throw std::invalid_argument("Optimization L-BFGS history size must be at least one.");
+      if (!(gradient_tolerance > 0.0))
+        throw std::invalid_argument("Optimization gradient tolerance must be positive.");
+      if (!(step_tolerance > 0.0))
+        throw std::invalid_argument("Optimization step tolerance must be positive.");
+      if (!(initial_trust_region_radius > 0.0))
+        throw std::invalid_argument("Optimization initial trust-region radius must be positive.");
+      if (!(lower_bound <= upper_bound))
+        throw std::invalid_argument("Optimization lower bound must not exceed upper bound.");
+    }
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/optimization/optimization_parameters.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/optimization/rol_reduced_objective.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+*/
+
+#ifndef _aspect_adjoint_optimization_rol_reduced_objective_h
+#define _aspect_adjoint_optimization_rol_reduced_objective_h
+
+#include <aspect/adjoint/optimization/rol_vector.h>
+
+#include <ROL_Objective.hpp>
+
+#include <map>
+#include <memory>
+#include <string>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim> class Manager;
+
+    /**
+     * Minimal native ROL adapter for the O3 reusable initial-temperature
+     * reduced functional. The simulator owns all PDE, P^T, and Riesz work;
+     * this class only validates the L2 control representation and transfers
+     * callback results across the ROL boundary. In particular, it caches a
+     * forward generation so ROL's separate value() and gradient() callbacks
+     * share one trajectory. The accepted-generation save/restore state is
+     * generic trust-region bookkeeping: trial/revert events must not leak a
+     * rejected forward state into the next callback.
+     */
+    template <int dim>
+    class ROLReducedObjective : public ROL::Objective<double>
+    {
+      public:
+        explicit ROLReducedObjective(Manager<dim> &manager);
+
+        void update(const ROL::Vector<double> &x,
+                    ROL::UpdateType type,
+                    int iteration = -1) override;
+        void update(const ROL::Vector<double> &x,
+                    bool flag = true,
+                    int iteration = -1) override;
+        double value(const ROL::Vector<double> &x, double &tolerance) override;
+        void gradient(ROL::Vector<double> &g,
+                      const ROL::Vector<double> &x,
+                      double &tolerance) override;
+        void hessVec(ROL::Vector<double> &hv,
+                     const ROL::Vector<double> &v,
+                     const ROL::Vector<double> &x,
+                     double &tolerance) override;
+        void invHessVec(ROL::Vector<double> &hv,
+                        const ROL::Vector<double> &v,
+                        const ROL::Vector<double> &x,
+                        double &tolerance) override;
+        void precond(ROL::Vector<double> &pv,
+                     const ROL::Vector<double> &v,
+                     const ROL::Vector<double> &x,
+                     double &tolerance) override;
+
+        unsigned int value_calls() const;
+        unsigned int gradient_calls() const;
+        unsigned int forward_evaluations() const;
+        unsigned int reverse_evaluations() const;
+        unsigned int cache_hits() const;
+        unsigned int cache_misses() const;
+        unsigned int generation_id() const;
+        unsigned int initial_updates() const;
+        unsigned int trial_updates() const;
+        unsigned int revert_updates() const;
+        unsigned int accept_updates() const;
+        unsigned int preconditioner_calls() const;
+        unsigned int hessvec_calls() const;
+        unsigned int inverse_hessvec_calls() const;
+
+      private:
+        static const ROLReducedL2Vector &as_l2_control(const ROL::Vector<double> &vector);
+        static ROLReducedL2Vector &as_l2_control(ROL::Vector<double> &vector);
+        static double extract_scalar_objective(const std::map<std::string, double> &objectives);
+        bool has_cached_control(const ROLReducedL2Vector &control) const;
+        void invalidate_live_forward_if_control_changed(const ROLReducedL2Vector &control);
+        void begin_generation(const ROLReducedL2Vector &control, const double objective);
+        void save_accepted_generation();
+        void restore_accepted_generation();
+        void discard_accepted_generation();
+
+        Manager<dim> &manager;
+        std::unique_ptr<LinearAlgebra::Vector> cached_control;
+        std::unique_ptr<LinearAlgebra::Vector> cached_l2_gradient;
+        double cached_objective;
+        bool cached_value_is_valid;
+        bool cached_gradient_is_valid;
+        bool forward_trajectory_is_live;
+        unsigned int current_generation_id;
+        unsigned int next_generation_id;
+        std::unique_ptr<LinearAlgebra::Vector> accepted_control;
+        std::unique_ptr<LinearAlgebra::Vector> accepted_l2_gradient;
+        double accepted_objective;
+        bool accepted_value_is_valid;
+        bool accepted_gradient_is_valid;
+        unsigned int accepted_generation_id;
+        unsigned int n_cache_hits;
+        unsigned int n_cache_misses;
+        unsigned int n_initial_updates = 0;
+        unsigned int n_trial_updates = 0;
+        unsigned int n_revert_updates = 0;
+        unsigned int n_accept_updates = 0;
+        unsigned int n_preconditioner_calls = 0;
+        unsigned int n_hessvec_calls = 0;
+        unsigned int n_inverse_hessvec_calls = 0;
+        unsigned int n_value_calls;
+        unsigned int n_gradient_calls;
+        unsigned int n_forward_evaluations;
+        unsigned int n_reverse_evaluations;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/optimization/rol_reduced_objective.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/optimization/rol_vector.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_optimization_rol_vector_h
+#define _aspect_adjoint_optimization_rol_vector_h
+
+#include <aspect/global.h>
+#include <aspect/linear_algebra_types.h>
+
+#include <ROL_BoundConstraint.hpp>
+#include <ROL_Vector.hpp>
+
+#include <cmath>
+#include <limits>
+#include <memory>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * An owned-only distributed ROL vector backed by ASPECT's scalar linear
+     * algebra vector. O1 deliberately uses the coefficient-space Euclidean
+     * metric; a later control-space layer supplies the physical Riesz metric.
+     */
+    class ROLDistributedVector : public ROL::Vector<double>
+    {
+      public:
+        ROLDistributedVector(const dealii::IndexSet &locally_owned_elements,
+                             const MPI_Comm          communicator);
+
+        explicit ROLDistributedVector(const LinearAlgebra::Vector &vector);
+
+        void plus(const ROL::Vector<double> &vector) override;
+        void scale(const double alpha) override;
+        double dot(const ROL::Vector<double> &vector) const override;
+        double norm() const override;
+        ROL::Ptr<ROL::Vector<double>> clone() const override;
+
+        void axpy(const double alpha, const ROL::Vector<double> &vector) override;
+        void set(const ROL::Vector<double> &vector) override;
+        ROL::Ptr<ROL::Vector<double>> basis(const int index) const override;
+        int dimension() const override;
+        void applyUnary(const ROL::Elementwise::UnaryFunction<double> &function) override;
+        void applyBinary(const ROL::Elementwise::BinaryFunction<double> &function,
+                         const ROL::Vector<double> &vector) override;
+        double reduce(const ROL::Elementwise::ReductionOp<double> &reduction) const override;
+        void setScalar(const double value) override;
+
+        LinearAlgebra::Vector &get_vector();
+        const LinearAlgebra::Vector &get_vector() const;
+
+        static ROLDistributedVector &get_vector(ROL::Vector<double> &vector);
+        static const ROLDistributedVector &get_vector(const ROL::Vector<double> &vector);
+
+        bool has_same_layout(const ROLDistributedVector &other) const;
+
+      private:
+        void assert_compatible(const ROLDistributedVector &other) const;
+
+        LinearAlgebra::Vector vector;
+    };
+
+
+    /**
+     * A reduced-control vector whose primal inner product is the cached
+     * consistent-temperature mass matrix.  The vector remains a primal vector:
+     * O4 supplies the Riesz representative as its gradient, so ROL's default
+     * self-dual representation is the intended one.
+     */
+    class ROLReducedL2Vector : public ROLDistributedVector
+    {
+      public:
+        ROLReducedL2Vector(const dealii::IndexSet &locally_owned_elements,
+                           const MPI_Comm communicator,
+                           const std::shared_ptr<const LinearAlgebra::SparseMatrix> &mass_matrix);
+
+        ROLReducedL2Vector(const LinearAlgebra::Vector &vector,
+                           const std::shared_ptr<const LinearAlgebra::SparseMatrix> &mass_matrix);
+
+        double dot(const ROL::Vector<double> &vector) const override;
+        ROL::Ptr<ROL::Vector<double>> clone() const override;
+
+        const std::shared_ptr<const LinearAlgebra::SparseMatrix> &mass_matrix() const;
+
+      private:
+        void assert_metric_compatible(const ROLReducedL2Vector &other) const;
+
+        std::shared_ptr<const LinearAlgebra::SparseMatrix> metric_mass_matrix;
+    };
+
+
+    /**
+     * Componentwise finite bounds for ROLDistributedVector. All bound data
+     * have the same owned-only partition as the optimized vector.
+     */
+    class ROLDistributedBoundConstraint : public ROL::BoundConstraint<double>
+    {
+      public:
+        ROLDistributedBoundConstraint(const LinearAlgebra::Vector &lower_bound,
+                                      const LinearAlgebra::Vector &upper_bound,
+                                      const double                 scale = 1.0,
+                                      const double                 feasibility_tolerance =
+                                        std::sqrt(std::numeric_limits<double>::epsilon()));
+
+        void project(ROL::Vector<double> &vector) override;
+        void projectInterior(ROL::Vector<double> &vector) override;
+        void pruneUpperActive(ROL::Vector<double> &vector,
+                              const ROL::Vector<double> &x,
+                              const double epsilon = 0.0) override;
+        void pruneUpperActive(ROL::Vector<double> &vector,
+                              const ROL::Vector<double> &gradient,
+                              const ROL::Vector<double> &x,
+                              const double x_epsilon = 0.0,
+                              const double gradient_epsilon = 0.0) override;
+        void pruneLowerActive(ROL::Vector<double> &vector,
+                              const ROL::Vector<double> &x,
+                              const double epsilon = 0.0) override;
+        void pruneLowerActive(ROL::Vector<double> &vector,
+                              const ROL::Vector<double> &gradient,
+                              const ROL::Vector<double> &x,
+                              const double x_epsilon = 0.0,
+                              const double gradient_epsilon = 0.0) override;
+        bool isFeasible(const ROL::Vector<double> &vector) override;
+
+        void applyInverseScalingFunction(ROL::Vector<double> &scaled_vector,
+                                         const ROL::Vector<double> &vector,
+                                         const ROL::Vector<double> &x,
+                                         const ROL::Vector<double> &gradient) const override;
+        void applyScalingFunctionJacobian(ROL::Vector<double> &scaled_vector,
+                                          const ROL::Vector<double> &vector,
+                                          const ROL::Vector<double> &x,
+                                          const ROL::Vector<double> &gradient) const override;
+
+      private:
+        void assert_compatible(const ROLDistributedVector &vector) const;
+        double active_tolerance(const double epsilon) const;
+        double scaling_cap(const types::global_dof_index index) const;
+        void build_scaling_function(ROLDistributedVector &scaling,
+                                    const ROLDistributedVector &x,
+                                    const ROLDistributedVector &gradient) const;
+
+        const double scale;
+        const double feasibility_tolerance;
+        double minimum_bound_width;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/optimization/rol_vector.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/optimization/initial_temperature_control.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+*/
+
+#include <aspect/adjoint/optimization/initial_temperature_control.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/dofs/dof_tools.h>
+#include <deal.II/fe/fe_values.h>
+#include <deal.II/lac/dynamic_sparsity_pattern.h>
+#include <deal.II/lac/sparsity_tools.h>
+#include <deal.II/lac/solver_cg.h>
+
+#include <map>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace
+    {
+      void finish_insert(LinearAlgebra::Vector &vector)
+      {
+        vector.compress(dealii::VectorOperation::insert);
+      }
+    }
+
+    template <int dim>
+    InitialTemperatureControl<dim>::InitialTemperatureControl(
+      const dealii::DoFHandler<dim> &dof_handler,
+      const dealii::ComponentMask &temperature_mask,
+      const dealii::AffineConstraints<double> &constraints,
+      const MPI_Comm communicator)
+      : InitialTemperatureControl(dof_handler, temperature_mask, constraints,
+                                  communicator, 0, dealii::IndexSet(), dealii::IndexSet())
+    {}
+
+    template <int dim>
+    InitialTemperatureControl<dim>::InitialTemperatureControl(
+      const dealii::DoFHandler<dim> &dof_handler,
+      const dealii::ComponentMask &temperature_mask,
+      const dealii::AffineConstraints<double> &constraints,
+      const MPI_Comm communicator,
+      const types::global_dof_index temperature_block_first_dof,
+      const dealii::IndexSet &temperature_block_owned,
+      const dealii::IndexSet &temperature_block_relevant)
+      : dof_handler(dof_handler)
+      , temperature_mask(temperature_mask)
+      , constraints(constraints)
+      , communicator(communicator)
+      , temperature_block_first_dof(temperature_block_first_dof)
+      , locally_owned_temperature_dofs(dof_handler.n_dofs())
+      , locally_relevant_temperature_dofs(dof_handler.n_dofs())
+      , locally_owned_temperature_block_dofs(temperature_block_owned)
+      , locally_relevant_temperature_block_dofs(temperature_block_relevant)
+      , locally_owned_controls(0)
+      , locally_relevant_controls(0)
+      , homogeneous_constraints(temperature_block_owned.size() == 0 ? dof_handler.locally_owned_dofs() : temperature_block_owned,
+                                temperature_block_relevant.size() == 0 ? dealii::DoFTools::extract_locally_relevant_dofs(dof_handler) : temperature_block_relevant)
+      , physical_constraints(temperature_block_owned.size() == 0 ? dof_handler.locally_owned_dofs() : temperature_block_owned,
+                             temperature_block_relevant.size() == 0 ? dealii::DoFTools::extract_locally_relevant_dofs(dof_handler) : temperature_block_relevant)
+    {
+      if (locally_owned_temperature_block_dofs.size() == 0)
+        locally_owned_temperature_block_dofs = dof_handler.locally_owned_dofs();
+      if (locally_relevant_temperature_block_dofs.size() == 0)
+        locally_relevant_temperature_block_dofs = dealii::DoFTools::extract_locally_relevant_dofs(dof_handler);
+      // DoFTools::extract_dofs() deliberately returns only locally owned
+      // DoFs. Local mass-matrix assembly also visits hanging-node masters on
+      // ghost cells, however, so a purely owned map would make P incomplete
+      // on partition boundaries. Build the temperature subset from both
+      // locally owned and ghost cells. This gives every locally assembled
+      // temperature row access to its complete reduced-control expansion.
+      locally_relevant_temperature_dofs.clear();
+      std::vector<types::global_dof_index> temperature_dofs(
+        dof_handler.get_fe().dofs_per_cell);
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned() || cell->is_ghost())
+          {
+            cell->get_dof_indices(temperature_dofs);
+            for (unsigned int i=0; i<temperature_dofs.size(); ++i)
+              if (temperature_mask[dof_handler.get_fe().system_to_component_index(i).first])
+                locally_relevant_temperature_dofs.add_index(temperature_dofs[i]);
+          }
+      locally_relevant_temperature_dofs.compress();
+      locally_owned_temperature_dofs =
+        locally_relevant_temperature_dofs & dof_handler.locally_owned_dofs();
+      locally_owned_temperature_dofs.compress();
+      const types::global_dof_index local_size =
+        std::count_if(locally_owned_temperature_dofs.begin(),
+                      locally_owned_temperature_dofs.end(),
+                      [this](const auto index)
+      {
+        return !this->constraints.is_constrained(index);
+      });
+      // Each unconstrained temperature DoF owns one reduced coefficient. An
+      // exclusive scan assigns globally contiguous reduced indices without a
+      // root-side gather: rank r owns [first, first+local_size). Dirichlet
+      // DoFs intentionally have no control coordinate because their values
+      // are imposed by the physical boundary condition, not optimization.
+      const unsigned long long local_size_mpi =
+        static_cast<unsigned long long>(local_size);
+      unsigned long long first_mpi = 0;
+      unsigned long long global_size_mpi = 0;
+      MPI_Exscan(&local_size_mpi, &first_mpi, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, communicator);
+      MPI_Allreduce(&local_size_mpi, &global_size_mpi, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM,
+                    communicator);
+      if (dealii::Utilities::MPI::this_mpi_process(communicator) == 0)
+        first_mpi = 0;
+      const types::global_dof_index first =
+        static_cast<types::global_dof_index>(first_mpi);
+      const types::global_dof_index global_size =
+        static_cast<types::global_dof_index>(global_size_mpi);
+      locally_owned_controls = dealii::IndexSet(global_size);
+      locally_owned_controls.add_range(first, first + local_size);
+      locally_owned_controls.compress();
+
+      types::global_dof_index next = first;
+      for (const auto index : locally_owned_temperature_dofs)
+        if (!constraints.is_constrained(index))
+          full_to_reduced.emplace(index, next++);
+
+      // Free masters needed by a local constraint row may be owned by another
+      // rank. Exchange the full-DoF -> reduced-DoF mapping once during setup;
+      // subsequent expansion and mass assembly are then purely local lookups.
+      const auto owners = dealii::Utilities::MPI::compute_index_owner(
+                            dof_handler.locally_owned_dofs(),
+                            locally_relevant_temperature_dofs,
+                            communicator);
+      AssertDimension(owners.size(), locally_relevant_temperature_dofs.n_elements());
+
+      const unsigned int my_rank =
+        dealii::Utilities::MPI::this_mpi_process(communicator);
+      std::map<unsigned int, std::vector<types::global_dof_index>> requested_dofs;
+      auto owner = owners.begin();
+      for (const auto index : locally_relevant_temperature_dofs)
+        {
+          if (*owner != my_rank)
+            requested_dofs[*owner].push_back(index);
+          ++owner;
+        }
+
+      const auto received_requests =
+        dealii::Utilities::MPI::some_to_some(communicator, requested_dofs);
+      std::map<unsigned int, std::vector<types::global_dof_index>> responses;
+      for (const auto &request : received_requests)
+        {
+          auto &response = responses[request.first];
+          response.reserve(request.second.size());
+          for (const auto index : request.second)
+            {
+              const auto entry = full_to_reduced.find(index);
+              response.push_back(entry == full_to_reduced.end() ?
+                                 dealii::numbers::invalid_dof_index : entry->second);
+            }
+        }
+
+      const auto received_responses =
+        dealii::Utilities::MPI::some_to_some(communicator, responses);
+      for (const auto &request : requested_dofs)
+        {
+          const auto response = received_responses.find(request.first);
+          AssertThrow(response != received_responses.end()
+                      && response->second.size() == request.second.size(),
+                      ExcMessage("The reduced temperature control map exchange failed."));
+          for (unsigned int i=0; i<request.second.size(); ++i)
+            if (response->second[i] != dealii::numbers::invalid_dof_index)
+              full_to_reduced.emplace(request.second[i], response->second[i]);
+        }
+
+      locally_relevant_controls = dealii::IndexSet(global_size);
+      // P maps reduced free coefficients c to a homogeneous conforming
+      // temperature perturbation delta_T=P c. A constrained row can reference
+      // remote free masters, so this relevant set is the union of all reduced
+      // column indices appearing in locally needed rows of P.
+      for (const auto index : locally_relevant_temperature_dofs)
+        for (const auto &entry : expand(index))
+          locally_relevant_controls.add_index(entry.first);
+      locally_relevant_controls.compress();
+      build_homogeneous_constraints();
+    }
+
+    template <int dim>
+    const dealii::IndexSet &InitialTemperatureControl<dim>::locally_owned_control_dofs() const
+    {
+      return locally_owned_controls;
+    }
+
+    template <int dim>
+    const dealii::IndexSet &InitialTemperatureControl<dim>::locally_relevant_control_dofs() const
+    {
+      return locally_relevant_controls;
+    }
+
+    template <int dim>
+    const dealii::IndexSet &InitialTemperatureControl<dim>::temperature_block_owned_dofs() const
+    {
+      return locally_owned_temperature_block_dofs;
+    }
+
+    template <int dim>
+    const dealii::IndexSet &InitialTemperatureControl<dim>::temperature_block_relevant_dofs() const
+    {
+      return locally_relevant_temperature_block_dofs;
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::assert_temperature_block_mapping() const
+    {
+      unsigned long long local_count = 0;
+      for (const auto dof : locally_owned_temperature_dofs)
+        {
+          const auto block_index = temperature_block_index(dof);
+          AssertThrow(locally_owned_temperature_block_dofs.is_element(block_index),
+                      ExcMessage("A locally owned mixed temperature DoF does not map "
+                                 "to a locally owned temperature-block entry."));
+          ++local_count;
+        }
+      const unsigned long long global_count =
+        dealii::Utilities::MPI::sum(local_count, communicator);
+      AssertThrow(global_count == locally_owned_temperature_block_dofs.size(),
+                  ExcMessage("The temperature-block mapping does not cover exactly "
+                             "the global temperature DoFs."));
+    }
+
+    template <int dim>
+    types::global_dof_index InitialTemperatureControl<dim>::n_control_dofs() const
+    {
+      return locally_owned_controls.size();
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::assert_control_layout(const LinearAlgebra::Vector &control) const
+    {
+      AssertThrow(control.size() == n_control_dofs()
+                  && control.locally_owned_elements() == locally_owned_controls,
+                  ExcMessage("Initial-temperature control has an incompatible reduced layout."));
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::assert_temperature_layout(
+      const LinearAlgebra::Vector &temperature) const
+    {
+      AssertThrow(!temperature.has_ghost_elements()
+                  && temperature.size() == locally_owned_temperature_block_dofs.size()
+                  && temperature.locally_owned_elements() == locally_owned_temperature_block_dofs,
+                  ExcMessage("Initial-temperature injection requires the owned-only "
+                             "temperature-block vector layout."));
+    }
+
+    template <int dim>
+    types::global_dof_index
+    InitialTemperatureControl<dim>::temperature_block_index(const types::global_dof_index dof) const
+    {
+      AssertThrow(dof >= temperature_block_first_dof,
+                  ExcMessage("A temperature DoF precedes its component-wise block."));
+      const types::global_dof_index result = dof - temperature_block_first_dof;
+      AssertThrow(result < locally_owned_temperature_block_dofs.size(),
+                  ExcMessage("A temperature DoF maps outside the temperature block."));
+      return result;
+    }
+
+    template <int dim>
+    typename InitialTemperatureControl<dim>::Expansion
+    InitialTemperatureControl<dim>::expand(const types::global_dof_index dof) const
+    {
+      AssertThrow(locally_relevant_temperature_dofs.is_element(dof),
+                  ExcMessage("A temperature control expansion was requested for a non-relevant DoF."));
+      if (!constraints.is_constrained(dof))
+        {
+          const auto entry = full_to_reduced.find(dof);
+          AssertThrow(entry != full_to_reduced.end(),
+                      ExcMessage("A free temperature DoF has no reduced control index."));
+          return {{entry->second, 1.0}};
+        }
+
+      Expansion result;
+      const auto *entries = constraints.get_constraint_entries(dof);
+      if (entries == nullptr)
+        return result; // Dirichlet row: no homogeneous control dependence.
+      // Recursively substitute constraint rows until only free reduced
+      // coordinates remain. This constructs one sparse row of P; multiplying
+      // weights along nested edges is essential when a master is constrained.
+      for (const auto &entry : *entries)
+        for (const auto &master : expand(entry.first))
+          result.emplace_back(master.first, entry.second * master.second);
+      return result;
+    }
+
+    template <int dim>
+    typename InitialTemperatureControl<dim>::Expansion
+    InitialTemperatureControl<dim>::expansion(const types::global_dof_index dof) const
+    {
+      return expand(dof);
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::build_homogeneous_constraints()
+    {
+      // Maintain two block-indexed graphs. The homogeneous graph describes
+      // admissible perturbations delta_T and hence P. The physical graph has
+      // the same linear entries plus original inhomogeneities and reconstructs
+      // a conforming physical initial temperature.
+      for (const auto index : locally_relevant_temperature_dofs)
+        if (constraints.is_constrained(index)
+            && homogeneous_constraints.can_store_line(temperature_block_index(index)))
+          {
+            const auto mapped_index = temperature_block_index(index);
+            homogeneous_constraints.add_line(mapped_index);
+            physical_constraints.add_line(mapped_index);
+            physical_constraints.set_inhomogeneity(mapped_index,
+                                                   constraints.get_inhomogeneity(index));
+            if (const auto *entries = constraints.get_constraint_entries(index))
+              for (const auto &entry : *entries)
+                {
+                  const auto mapped_entry = temperature_block_index(entry.first);
+                  homogeneous_constraints.add_entry(mapped_index, mapped_entry, entry.second);
+                  physical_constraints.add_entry(mapped_index, mapped_entry, entry.second);
+                }
+          }
+      homogeneous_constraints.close();
+      physical_constraints.close();
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::inject_perturbation(
+      const LinearAlgebra::Vector &control, LinearAlgebra::Vector &temperature) const
+    {
+      assert_control_layout(control);
+      assert_temperature_layout(temperature);
+
+      // AffineConstraints::distribute() creates a temporary Trilinos vector
+      // with its import IndexSet as an ownership map. In deal.II 9.6 that is
+      // unsafe when a hanging-node row needs a remote master: the temporary
+      // map overlaps between ranks. Import just the needed reduced control
+      // coefficients with the same explicit point-to-point exchange used to
+      // build full_to_reduced, then evaluate the already-recursive P rows.
+      // This is deliberately an owned-only output operation: the caller may
+      // safely assign the result into ASPECT's ghosted solution block after
+      // this routine returns, but never writes through a ghost ownership map.
+      dealii::IndexSet remotely_needed_controls(n_control_dofs());
+      for (const auto index : locally_owned_temperature_dofs)
+        for (const auto &entry : expand(index))
+          if (!locally_owned_controls.is_element(entry.first))
+            remotely_needed_controls.add_index(entry.first);
+      remotely_needed_controls.compress();
+      const auto control_owners = dealii::Utilities::MPI::compute_index_owner(
+                                    locally_owned_controls, remotely_needed_controls, communicator);
+      AssertDimension(control_owners.size(), remotely_needed_controls.n_elements());
+      const unsigned int my_rank =
+        dealii::Utilities::MPI::this_mpi_process(communicator);
+      std::map<unsigned int, std::vector<types::global_dof_index>> requests;
+      auto owner = control_owners.begin();
+      for (const auto index : remotely_needed_controls)
+        {
+          AssertThrow(*owner != my_rank,
+                      ExcInternalError());
+          requests[*owner].push_back(index);
+          ++owner;
+        }
+      const auto received_requests =
+        dealii::Utilities::MPI::some_to_some(communicator, requests);
+      std::map<unsigned int, std::vector<double>> responses;
+      for (const auto &request : received_requests)
+        {
+          auto &response = responses[request.first];
+          response.reserve(request.second.size());
+          for (const auto index : request.second)
+            {
+              AssertThrow(locally_owned_controls.is_element(index),
+                          ExcInternalError());
+              response.push_back(control[index]);
+            }
+        }
+      const auto received_responses =
+        dealii::Utilities::MPI::some_to_some(communicator, responses);
+      std::map<types::global_dof_index, double> imported_control_values;
+      for (const auto &request : requests)
+        {
+          const auto response = received_responses.find(request.first);
+          AssertThrow(response != received_responses.end()
+                      && response->second.size() == request.second.size(),
+                      ExcMessage("The reduced temperature control value exchange failed."));
+          for (unsigned int i = 0; i < request.second.size(); ++i)
+            imported_control_values.emplace(request.second[i], response->second[i]);
+        }
+
+      // Evaluate delta_T_i=sum_j P_ij c_j for each owned temperature DoF. The
+      // exchange above supplies exactly the remote c_j referenced by local
+      // rows, avoiding an overlapping writable Trilinos vector.
+      temperature = 0.0;
+      for (const auto index : locally_owned_temperature_dofs)
+        {
+          double value = 0.0;
+          for (const auto &entry : expand(index))
+            if (locally_owned_controls.is_element(entry.first))
+              value += entry.second * control[entry.first];
+            else
+              {
+                const auto imported = imported_control_values.find(entry.first);
+                AssertThrow(imported != imported_control_values.end(),
+                            ExcInternalError());
+                value += entry.second * imported->second;
+              }
+          temperature[temperature_block_index(index)] = value;
+        }
+      finish_insert(temperature);
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::inject_physical(
+      const LinearAlgebra::Vector &control, const LinearAlgebra::Vector &fixed_temperature,
+      LinearAlgebra::Vector &temperature) const
+    {
+      assert_control_layout(control);
+      assert_temperature_layout(fixed_temperature);
+      assert_temperature_layout(temperature);
+      temperature = fixed_temperature;
+      // T_fixed already satisfies the physical (possibly inhomogeneous)
+      // constraints captured at the optimization baseline. Construct the
+      // perturbation with the homogeneous P map and add it instead of
+      // redistributing T_fixed through a second constraint object.
+      LinearAlgebra::Vector perturbation(locally_owned_temperature_block_dofs,
+                                         communicator);
+      inject_perturbation(control, perturbation);
+      temperature += perturbation;
+
+      // The canonical ASPECT baseline is normally already conforming, but a
+      // physical injection also has to be correct for an arbitrary owned
+      // T_fixed. Reapply inhomogeneous rows without
+      // AffineConstraints::distribute(): its temporary overlapping Trilinos
+      // import map is not a writable owned-only map in this workflow.
+      dealii::IndexSet remotely_needed_temperature_masters(dof_handler.n_dofs());
+      for (const auto index : locally_owned_temperature_dofs)
+        if (constraints.is_constrained(index))
+          if (const auto *entries = constraints.get_constraint_entries(index))
+            for (const auto &entry : *entries)
+              if (!locally_owned_temperature_dofs.is_element(entry.first))
+                remotely_needed_temperature_masters.add_index(entry.first);
+      remotely_needed_temperature_masters.compress();
+      const auto temperature_owners = dealii::Utilities::MPI::compute_index_owner(
+                                        dof_handler.locally_owned_dofs(), remotely_needed_temperature_masters, communicator);
+      AssertDimension(temperature_owners.size(),
+                      remotely_needed_temperature_masters.n_elements());
+      const unsigned int my_rank = dealii::Utilities::MPI::this_mpi_process(communicator);
+      std::map<unsigned int, std::vector<types::global_dof_index>> requests;
+      auto owner = temperature_owners.begin();
+      for (const auto index : remotely_needed_temperature_masters)
+        {
+          AssertThrow(*owner != my_rank, ExcInternalError());
+          requests[*owner].push_back(index);
+          ++owner;
+        }
+      const auto received_requests =
+        dealii::Utilities::MPI::some_to_some(communicator, requests);
+      std::map<unsigned int, std::vector<double>> responses;
+      for (const auto &request : received_requests)
+        {
+          auto &response = responses[request.first];
+          response.reserve(request.second.size());
+          for (const auto index : request.second)
+            {
+              AssertThrow(locally_owned_temperature_dofs.is_element(index), ExcInternalError());
+              response.push_back(temperature[temperature_block_index(index)]);
+            }
+        }
+      const auto received_responses =
+        dealii::Utilities::MPI::some_to_some(communicator, responses);
+      std::map<types::global_dof_index, double> imported_temperature_values;
+      for (const auto &request : requests)
+        {
+          const auto response = received_responses.find(request.first);
+          AssertThrow(response != received_responses.end()
+                      && response->second.size() == request.second.size(),
+                      ExcMessage("The physical temperature value exchange failed."));
+          for (unsigned int i = 0; i < request.second.size(); ++i)
+            imported_temperature_values.emplace(request.second[i], response->second[i]);
+        }
+      for (const auto index : locally_owned_temperature_dofs)
+        if (constraints.is_constrained(index))
+          {
+            double value = constraints.get_inhomogeneity(index);
+            if (const auto *entries = constraints.get_constraint_entries(index))
+              for (const auto &entry : *entries)
+                if (locally_owned_temperature_dofs.is_element(entry.first))
+                  value += entry.second * temperature[temperature_block_index(entry.first)];
+                else
+                  {
+                    const auto imported = imported_temperature_values.find(entry.first);
+                    AssertThrow(imported != imported_temperature_values.end(), ExcInternalError());
+                    value += entry.second * imported->second;
+                  }
+            temperature[temperature_block_index(index)] = value;
+          }
+      finish_insert(temperature);
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::restrict_covector(
+      const LinearAlgebra::Vector &raw_covector, LinearAlgebra::Vector &control_covector) const
+    {
+      assert_control_layout(control_covector);
+      assert_temperature_layout(raw_covector);
+      // Since delta_T=P delta_c, a full-space covector r_T satisfies
+      //   delta_J=r_T^T P delta_c=(P^T r_T)^T delta_c.
+      // Restriction is therefore P^T. compress(add) is required because a
+      // reduced master may receive constrained rows owned by several ranks.
+      control_covector = 0.0;
+      for (const auto index : locally_owned_temperature_dofs)
+        for (const auto &entry : expand(index))
+          control_covector[entry.first] += raw_covector[temperature_block_index(index)] * entry.second;
+      control_covector.compress(dealii::VectorOperation::add);
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::assemble_mass_matrix(
+      const dealii::Mapping<dim> &mapping, const dealii::Quadrature<dim> &quadrature)
+    {
+      if (reduced_mass_matrix != nullptr)
+        return;
+      // The optimization metric is physical L2. With delta_T=P c and the full
+      // temperature mass matrix M_T, the reduced Riesz map is
+      //
+      //                         M_c=P^T M_T P.
+      //
+      // Build its sparsity from reduced coordinates that co-occur in local
+      // expansions of temperature basis functions.
+      dealii::DynamicSparsityPattern dsp(locally_relevant_controls);
+      const unsigned int dofs_per_cell = dof_handler.get_fe().dofs_per_cell;
+      std::vector<types::global_dof_index> dofs(dofs_per_cell);
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(dofs);
+            for (unsigned int i=0; i<dofs_per_cell; ++i)
+              if (temperature_mask[dof_handler.get_fe().system_to_component_index(i).first])
+                for (const auto &row : expand(dofs[i]))
+                  for (unsigned int j=0; j<dofs_per_cell; ++j)
+                    if (temperature_mask[dof_handler.get_fe().system_to_component_index(j).first])
+                      for (const auto &column : expand(dofs[j]))
+                        dsp.add(row.first, column.first);
+          }
+      reduced_mass_matrix = std::make_shared<LinearAlgebra::SparseMatrix>();
+      dealii::SparsityTools::distribute_sparsity_pattern(dsp,
+                                                         locally_owned_controls,
+                                                         communicator,
+                                                         locally_relevant_controls);
+      reduced_mass_matrix->reinit(locally_owned_controls, dsp, communicator);
+
+      // Assemble the triple product at element level. Every full mass entry
+      // integral phi_i phi_j is multiplied by one P coefficient from row i
+      // and one from row j before being inserted into reduced coordinates.
+      dealii::FEValues<dim> fe_values(mapping, dof_handler.get_fe(), quadrature,
+                                      dealii::update_values | dealii::update_JxW_values);
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            cell->get_dof_indices(dofs);
+            for (unsigned int i=0; i<dofs_per_cell; ++i)
+              if (temperature_mask[dof_handler.get_fe().system_to_component_index(i).first])
+                for (unsigned int j=0; j<dofs_per_cell; ++j)
+                  if (temperature_mask[dof_handler.get_fe().system_to_component_index(j).first])
+                    {
+                      double entry = 0.0;
+                      for (unsigned int q=0; q<quadrature.size(); ++q)
+                        entry += fe_values.shape_value(i,q) * fe_values.shape_value(j,q) * fe_values.JxW(q);
+                      for (const auto &row : expand(dofs[i]))
+                        for (const auto &column : expand(dofs[j]))
+                          reduced_mass_matrix->add(row.first, column.first,
+                                                   row.second * entry * column.second);
+                    }
+          }
+      reduced_mass_matrix->compress(dealii::VectorOperation::add);
+      mass_preconditioner = std::make_shared<LinearAlgebra::PreconditionJacobi>();
+      typename LinearAlgebra::PreconditionJacobi::AdditionalData data;
+      mass_preconditioner->initialize(*reduced_mass_matrix, data);
+    }
+
+    template <int dim>
+    std::shared_ptr<const LinearAlgebra::SparseMatrix>
+    InitialTemperatureControl<dim>::mass_matrix() const
+    {
+      AssertThrow(reduced_mass_matrix != nullptr, ExcMessage("The reduced temperature mass matrix is not assembled."));
+      return reduced_mass_matrix;
+    }
+
+    template <int dim>
+    void InitialTemperatureControl<dim>::solve_l2_riesz(
+      const LinearAlgebra::Vector &rhs, LinearAlgebra::Vector &result,
+      const double relative_tolerance) const
+    {
+      assert_control_layout(rhs);
+      assert_control_layout(result);
+      AssertThrow(reduced_mass_matrix != nullptr && mass_preconditioner != nullptr,
+                  ExcMessage("The reduced temperature mass matrix is not assembled."));
+      // Convert reduced covector r=P^T dJ/dT into its L2 gradient g through
+      // M_c g=r, so dJ[c](s)=<g,s>_L2. M_c is SPD on independent free
+      // controls, permitting Jacobi-preconditioned conjugate gradients.
+      const double rhs_norm = rhs.l2_norm();
+      result = 0.0;
+      if (rhs_norm == 0.0)
+        return;
+      dealii::SolverControl control(5*n_control_dofs(), relative_tolerance * rhs_norm);
+      dealii::SolverCG<LinearAlgebra::Vector> solver(control);
+      solver.solve(*reduced_mass_matrix, result, rhs, *mass_preconditioner);
+    }
+
+    template class InitialTemperatureControl<2>;
+    template class InitialTemperatureControl<3>;
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/optimization/initial_temperature_control.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/optimization/initial_temperature_manager.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/core/manager.h>
+#include <aspect/adjoint/core/instantaneous_stokes_workflow.h>
+#include <aspect/adjoint/core/simulator_state.h>
+#include <aspect/adjoint/operators/stokes_adjoint_solver.h>
+#include <aspect/adjoint/objective/temperature_field_objective.h>
+
+#include <aspect/geometry_model/box.h>
+#include <aspect/gravity_model/vertical.h>
+#include <aspect/material_model/simple.h>
+#include <aspect/adjoint/operators/advection_adjoint_calculator.h>
+#include <aspect/adjoint/operators/boundary_conditions.h>
+#include <aspect/adjoint/operators/material_model_adjoint.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/simulator.h>
+#include <aspect/simulator/solver/stokes_matrix_free.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/base/table_handler.h>
+#include <deal.II/base/utilities.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <set>
+#include <string>
+
+#if defined(__APPLE__)
+#  include <mach/mach.h>
+#endif
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    void
+    Manager<dim>::capture_optimization_initial_state()
+    {
+      AssertThrow(simulator != nullptr, ExcInternalError());
+      AssertThrow(!initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("The canonical optimization initial state was captured twice."));
+
+      // Refresh constraints at the capture boundary. The control-space object
+      // itself is built lazily after a restore, because it references this
+      // mutable simulator constraint object.
+      // This snapshot is the canonical evaluation origin. Every ROL trial must
+      // start from identical solution/history, time integrator counters,
+      // constraints, and solver-failure counters; otherwise J(c) would depend
+      // on callback order rather than only on the control c.
+      simulator->compute_current_constraints();
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      initial_temperature_optimization.fixed_temperature = std::make_unique<LinearAlgebra::Vector>(
+                                                             this->introspection().index_sets.system_partitioning[temperature_block],
+                                                             this->get_mpi_communicator());
+      *initial_temperature_optimization.fixed_temperature = simulator->solution.block(temperature_block);
+
+      initial_temperature_optimization.canonical_state.solution = simulator->solution;
+      initial_temperature_optimization.canonical_state.old_solution = simulator->old_solution;
+      initial_temperature_optimization.canonical_state.old_old_solution = simulator->old_old_solution;
+      initial_temperature_optimization.canonical_state.current_linearization_point =
+        simulator->current_linearization_point;
+      initial_temperature_optimization.canonical_state.system_right_hand_side = simulator->system_rhs;
+      initial_temperature_optimization.canonical_state.current_constraints.copy_from(simulator->current_constraints);
+      initial_temperature_optimization.canonical_state.time = simulator->time;
+      initial_temperature_optimization.canonical_state.time_step = simulator->time_step;
+      initial_temperature_optimization.canonical_state.old_time_step = simulator->old_time_step;
+      initial_temperature_optimization.canonical_state.pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+      initial_temperature_optimization.canonical_state.pressure_scaling = simulator->pressure_scaling;
+      initial_temperature_optimization.canonical_state.timestep_number = simulator->timestep_number;
+      initial_temperature_optimization.canonical_state.nonlinear_iteration = simulator->nonlinear_iteration;
+      initial_temperature_optimization.canonical_state.nonlinear_solver_failures = simulator->nonlinear_solver_failures;
+      initial_temperature_optimization.canonical_state.linear_solver_failures = simulator->linear_solver_failures;
+      initial_temperature_optimization.canonical_state.rebuild_sparsity_and_matrices =
+        simulator->rebuild_sparsity_and_matrices;
+      initial_temperature_optimization.canonical_state.rebuild_stokes_matrix = simulator->rebuild_stokes_matrix;
+      initial_temperature_optimization.canonical_state.rebuild_stokes_preconditioner =
+        simulator->rebuild_stokes_preconditioner;
+      initial_temperature_optimization.canonical_state.captured = true;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::restore_optimization_initial_state()
+    {
+      AssertThrow(simulator != nullptr && initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("No canonical optimization initial state is available."));
+
+      // Restore the complete canonical state before installing a new control.
+      // Time-stepping plugins may keep mutable decision history outside the
+      // solution vectors, so their runtime state is reset explicitly as part
+      // of the reduced-objective transaction.
+      simulator->time_stepping_manager.reset_runtime_state_for_new_evaluation();
+      simulator->solution = initial_temperature_optimization.canonical_state.solution;
+      simulator->old_solution = initial_temperature_optimization.canonical_state.old_solution;
+      simulator->old_old_solution = initial_temperature_optimization.canonical_state.old_old_solution;
+      simulator->current_linearization_point =
+        initial_temperature_optimization.canonical_state.current_linearization_point;
+      simulator->system_rhs = initial_temperature_optimization.canonical_state.system_right_hand_side;
+      simulator->current_constraints.copy_from(initial_temperature_optimization.canonical_state.current_constraints);
+      simulator->time = initial_temperature_optimization.canonical_state.time;
+      simulator->time_step = initial_temperature_optimization.canonical_state.time_step;
+      simulator->old_time_step = initial_temperature_optimization.canonical_state.old_time_step;
+      simulator->last_pressure_normalization_adjustment =
+        initial_temperature_optimization.canonical_state.pressure_normalization_adjustment;
+      simulator->pressure_scaling = initial_temperature_optimization.canonical_state.pressure_scaling;
+      simulator->timestep_number = initial_temperature_optimization.canonical_state.timestep_number;
+      simulator->nonlinear_iteration = initial_temperature_optimization.canonical_state.nonlinear_iteration;
+      simulator->nonlinear_solver_failures = initial_temperature_optimization.canonical_state.nonlinear_solver_failures;
+      simulator->linear_solver_failures = initial_temperature_optimization.canonical_state.linear_solver_failures;
+
+      // Solver objects are runtime state, not canonical baseline state. Force
+      // their normal lazy reconstruction after control installation.
+      simulator->rebuild_sparsity_and_matrices = true;
+      simulator->rebuild_stokes_matrix = true;
+      simulator->rebuild_stokes_preconditioner = true;
+
+      // All products below are control-dependent. Discarding them here keeps
+      // objective, trajectory, reverse histories, and kernels in the same
+      // generation as the newly restored forward state.
+      objective_results.clear();
+      adjoint_states.clear();
+      trajectory_manager.reset();
+      trajectory_manager.reverse_state_cache.clear();
+      trajectory_manager.forward_replay_windows.clear();
+      trajectory_manager.terminal_anchor_history.clear();
+      trajectory_manager.sparse_anchor_steps.clear();
+      if (time_dependent_workflow.initial_temperature_gradient.size() != 0)
+        time_dependent_workflow.initial_temperature_gradient = 0.0;
+      time_dependent_workflow.initial_composition_gradients.clear();
+      kernels = KernelRepository<dim>();
+    }
+
+
+
+    template <int dim>
+    bool
+    Manager<dim>::has_optimization_initial_state() const
+    {
+      return initial_temperature_optimization.canonical_state.captured;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::ensure_initial_temperature_control_space()
+    {
+      AssertThrow(initial_temperature_optimization.canonical_state.captured
+                  && initial_temperature_optimization.fixed_temperature != nullptr,
+                  ExcMessage("Initial-temperature control space requires a captured O3 baseline."));
+
+      // The control map depends on the current DoF partition and constraint
+      // graph. Build it lazily after canonical restore and keep it for later
+      // evaluations because optimization is restricted to a fixed mesh.
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      simulator->compute_current_constraints();
+      if (initial_temperature_optimization.control_space == nullptr)
+        {
+          types::global_dof_index temperature_block_first_dof = 0;
+          for (unsigned int block = 0; block < temperature_block; ++block)
+            temperature_block_first_dof += this->introspection().system_dofs_per_block[block];
+          initial_temperature_optimization.control_space = std::make_unique<InitialTemperatureControl<dim>>(
+                                                             simulator->dof_handler,
+                                                             this->introspection().component_masks.temperature,
+                                                             simulator->current_constraints,
+                                                             this->get_mpi_communicator(),
+                                                             temperature_block_first_dof,
+                                                             this->introspection().index_sets.system_partitioning[temperature_block],
+                                                             this->introspection().index_sets.system_relevant_partitioning[temperature_block]);
+        }
+    }
+
+
+
+    template <int dim>
+    const InitialTemperatureControl<dim> &
+    Manager<dim>::get_initial_temperature_control_space()
+    {
+      restore_optimization_initial_state();
+      ensure_initial_temperature_control_space();
+      const QGauss<dim> mass_quadrature(simulator->dof_handler.get_fe().degree + 1);
+      initial_temperature_optimization.control_space->assemble_mass_matrix(*simulator->mapping, mass_quadrature);
+      return *initial_temperature_optimization.control_space;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::set_terminal_temperature_observation_from_current_state()
+    {
+      bool installed = false;
+      for (const auto &objective : objective_manager.get_active_plugins())
+        if (auto *temperature_objective =
+              dynamic_cast<TemperatureFieldObjective<dim> *>(objective.get()))
+          {
+            temperature_objective->set_discrete_terminal_observation(simulator->solution);
+            installed = true;
+          }
+      AssertThrow(installed,
+                  ExcMessage("A terminal temperature objective is required for a synthetic observation."));
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::install_initial_temperature_control(const LinearAlgebra::Vector &control)
+    {
+      ensure_initial_temperature_control_space();
+
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      LinearAlgebra::Vector controlled_temperature(
+        this->introspection().index_sets.system_partitioning[temperature_block],
+        this->get_mpi_communicator());
+      // Install T_0(c)=T_fixed+P c, including physical inhomogeneous boundary
+      // rows. The reduced control never overwrites prescribed Dirichlet data.
+      initial_temperature_optimization.control_space->inject_physical(
+        control, *initial_temperature_optimization.fixed_temperature, controlled_temperature);
+      // solution is a ghosted read vector in distributed ASPECT runs. Build
+      // the control in owned-only storage and use the normal ASPECT transfer
+      // into that ghosted block instead of writing through its ghost map.
+      simulator->solution.block(temperature_block) = controlled_temperature;
+
+      // The initial BDF history represents the same controlled physical
+      // state. Rebuilding it from the installed state avoids carrying a
+      // previous trial's temperature into the first accepted step.
+      simulator->old_solution.block(temperature_block) = simulator->solution.block(temperature_block);
+      simulator->old_old_solution.block(temperature_block) = simulator->solution.block(temperature_block);
+      simulator->current_linearization_point.block(temperature_block) =
+        simulator->solution.block(temperature_block);
+      simulator->compute_initial_pressure_field();
+      // Pressure and the nonlinear linearization point depend on the newly
+      // controlled temperature. Reinitialize them before the first Stokes
+      // solve rather than carrying values from the canonical baseline.
+      simulator->initialize_current_linearization_point();
+      simulator->rebuild_sparsity_and_matrices = true;
+      simulator->rebuild_stokes_matrix = true;
+      simulator->rebuild_stokes_preconditioner = true;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::set_optimization_initial_temperature_baseline(
+      const LinearAlgebra::Vector &baseline)
+    {
+      AssertThrow(initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("An optimization baseline must be captured before replacing "
+                             "its physical initial temperature."));
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const auto &owned = this->introspection().index_sets.system_partitioning[temperature_block];
+      AssertThrow(baseline.size() == owned.size()
+                  && baseline.locally_owned_elements() == owned,
+                  ExcMessage("The replacement initial-temperature baseline has an "
+                             "incompatible block layout."));
+      initial_temperature_optimization.fixed_temperature = std::make_unique<LinearAlgebra::Vector>(owned,
+                                                           this->get_mpi_communicator());
+      *initial_temperature_optimization.fixed_temperature = baseline;
+    }
+
+
+
+    template <int dim>
+    const LinearAlgebra::Vector &
+    Manager<dim>::get_optimization_initial_temperature_baseline() const
+    {
+      AssertThrow(initial_temperature_optimization.fixed_temperature != nullptr,
+                  ExcMessage("No physical initial-temperature baseline is installed."));
+      return *initial_temperature_optimization.fixed_temperature;
+    }
+
+
+
+    template <int dim>
+    LinearAlgebra::Vector
+    Manager<dim>::reduced_control_from_physical_temperature(
+      const LinearAlgebra::Vector &temperature)
+    {
+      ensure_initial_temperature_control_space();
+      const auto &control_space = *initial_temperature_optimization.control_space;
+      const auto &temperature_owned = control_space.temperature_block_owned_dofs();
+      AssertThrow(temperature.size() == temperature_owned.size()
+                  && temperature.locally_owned_elements() == temperature_owned,
+                  ExcMessage("The physical temperature has an incompatible block layout."));
+
+      // Invert T=T_fixed+P c only on free rows, where P is the identity by
+      // construction. Constrained rows are consequences of these coordinates
+      // and must not create independent control values.
+      LinearAlgebra::Vector control(control_space.locally_owned_control_dofs(),
+                                    this->get_mpi_communicator());
+      control = 0.0;
+      types::global_dof_index temperature_first_dof = 0;
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      for (unsigned int block = 0; block < temperature_block; ++block)
+        temperature_first_dof += this->introspection().system_dofs_per_block[block];
+      for (const auto local_index : temperature_owned)
+        {
+          const auto temperature_dof = temperature_first_dof + local_index;
+          if (simulator->current_constraints.is_constrained(temperature_dof))
+            continue;
+          const auto expansion = control_space.expansion(temperature_dof);
+          AssertThrow(expansion.size() == 1 && expansion.front().second == 1.0,
+                      ExcMessage("A free initial-temperature DoF must map directly "
+                                 "to one reduced control coefficient."));
+          AssertThrow(control.locally_owned_elements().is_element(expansion.front().first),
+                      ExcInternalError());
+          control[expansion.front().first] =
+            temperature[local_index] - (*initial_temperature_optimization.fixed_temperature)[local_index];
+        }
+      control.compress(VectorOperation::insert);
+      return control;
+    }
+
+
+
+    template <int dim>
+    std::pair<LinearAlgebra::Vector, LinearAlgebra::Vector>
+    Manager<dim>::initial_temperature_control_physical_bounds()
+    {
+      ensure_initial_temperature_control_space();
+      const auto &control_space = *initial_temperature_optimization.control_space;
+      // Physical nondimensional bounds 0<=T_fixed+c<=1 translate on every
+      // free coordinate to -T_fixed<=c<=1-T_fixed. Constraint-dependent rows
+      // carry no independent box bound because they are not control DoFs.
+      LinearAlgebra::Vector lower(control_space.locally_owned_control_dofs(),
+                                  this->get_mpi_communicator());
+      LinearAlgebra::Vector upper(control_space.locally_owned_control_dofs(),
+                                  this->get_mpi_communicator());
+      lower = 0.0;
+      upper = 0.0;
+      types::global_dof_index temperature_first_dof = 0;
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      for (unsigned int block = 0; block < temperature_block; ++block)
+        temperature_first_dof += this->introspection().system_dofs_per_block[block];
+      for (const auto local_index : control_space.temperature_block_owned_dofs())
+        {
+          const auto temperature_dof = temperature_first_dof + local_index;
+          if (simulator->current_constraints.is_constrained(temperature_dof))
+            continue;
+          const auto expansion = control_space.expansion(temperature_dof);
+          AssertThrow(expansion.size() == 1 && expansion.front().second == 1.0,
+                      ExcMessage("A free initial-temperature DoF must map directly "
+                                 "to one reduced control coefficient."));
+          lower[expansion.front().first] = -(*initial_temperature_optimization.fixed_temperature)[local_index];
+          upper[expansion.front().first] = 1.0 - (*initial_temperature_optimization.fixed_temperature)[local_index];
+        }
+      lower.compress(VectorOperation::insert);
+      upper.compress(VectorOperation::insert);
+      return {std::move(lower), std::move(upper)};
+    }
+
+
+
+    template <int dim>
+    std::pair<double, double>
+    Manager<dim>::initial_temperature_control_physical_min_max(
+      const LinearAlgebra::Vector &control)
+    {
+      ensure_initial_temperature_control_space();
+      LinearAlgebra::Vector physical(initial_temperature_optimization.control_space->temperature_block_owned_dofs(),
+                                     this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->inject_physical(control,
+                                                                      *initial_temperature_optimization.fixed_temperature,
+                                                                      physical);
+      return {physical.min(), physical.max()};
+    }
+
+
+
+    template <int dim>
+    double
+    Manager<dim>::temperature_l2_difference(const LinearAlgebra::Vector &first,
+                                            const LinearAlgebra::Vector &second) const
+    {
+      // Evaluate ||T_a-T_b||_L2 by FE quadrature, not by the coefficient-vector
+      // Euclidean norm. This makes reconstruction diagnostics invariant under
+      // basis scaling and mesh-cell volume.
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      LinearAlgebra::BlockVector difference = simulator->solution;
+      difference.block(temperature_block) = first;
+      difference.block(temperature_block) -= second;
+
+      const QGauss<dim> quadrature(simulator->dof_handler.get_fe().degree + 1);
+      FEValues<dim> fe_values(*simulator->mapping, simulator->finite_element,
+                              quadrature, update_values | update_JxW_values);
+      std::vector<double> values(quadrature.size());
+      double local_norm_squared = 0.0;
+      for (const auto &cell : simulator->dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[this->introspection().extractors.temperature].get_function_values(
+              difference, values);
+            for (unsigned int q = 0; q < quadrature.size(); ++q)
+              local_norm_squared += values[q] * values[q] * fe_values.JxW(q);
+          }
+      return std::sqrt(Utilities::MPI::sum(local_norm_squared,
+                                           this->get_mpi_communicator()));
+    }
+
+
+
+    template <int dim>
+    double
+    Manager<dim>::initial_temperature_control_reconstruction_error_l2(
+      const LinearAlgebra::Vector &control,
+      const LinearAlgebra::Vector &temperature)
+    {
+      ensure_initial_temperature_control_space();
+      LinearAlgebra::Vector reconstructed(
+        initial_temperature_optimization.control_space->temperature_block_owned_dofs(),
+        this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->inject_physical(control,
+                                                                      *initial_temperature_optimization.fixed_temperature,
+                                                                      reconstructed);
+      return temperature_l2_difference(reconstructed, temperature);
+    }
+
+
+
+    template <int dim>
+    std::map<std::string, double>
+    Manager<dim>::evaluate_initial_temperature_control(
+      const LinearAlgebra::Vector &control,
+      LinearAlgebra::Vector *l2_gradient)
+    {
+      AssertThrow(time_dependent_temperature_workflow_enabled(),
+                  ExcMessage("Initial-temperature control evaluation requires the "
+                             "time-dependent temperature adjoint workflow."));
+      AssertThrow(initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("Initial-temperature control evaluation requires a "
+                             "captured O3 baseline."));
+      AssertThrow(simulator->particle_managers.empty()
+                  && simulator->mesh_deformation == nullptr,
+                  ExcMessage("Reusable in-memory control evaluation supports only "
+                             "fixed meshes without particles."));
+      AssertThrow(this->get_parameters().adaptive_refinement_interval == 0
+                  && this->get_parameters().additional_refinement_times.empty(),
+                  ExcMessage("Reusable in-memory control evaluation requires a fixed mesh."));
+
+      // One reduced value evaluation is a deterministic transaction:
+      // restore canonical state -> install T_0(c) -> run the complete forward
+      // time loop -> either retain its trajectory or immediately reverse it.
+      restore_optimization_initial_state();
+      install_initial_temperature_control(control);
+
+      unsigned int max_refinement_level = this->get_parameters().initial_global_refinement
+                                          + this->get_parameters().initial_adaptive_refinement;
+      std::time_t last_checkpoint_time = std::time(nullptr);
+      AssertThrow(!simulator->run_forward_time_loop(max_refinement_level,
+                                                    last_checkpoint_time,
+                                                    true),
+                  ExcMessage("Reusable in-memory control evaluation cannot cross "
+                             "an initial adaptive-refinement boundary."));
+
+      if (l2_gradient == nullptr)
+        {
+          // Value-only callbacks evaluate the terminal scalar but leave the
+          // just-recorded trajectory live. ROLReducedObjective may consume it
+          // in a following gradient() call without a second forward solve.
+          LinearAlgebra::BlockVector terminal_temperature_seed;
+          terminal_temperature_seed.reinit(
+            this->introspection().index_sets.system_partitioning,
+            this->get_mpi_communicator());
+          terminal_temperature_seed = 0.0;
+          return objective_manager.evaluate_and_assemble_terminal_temperature_right_hand_side(
+                   terminal_temperature_seed);
+        }
+
+      return complete_initial_temperature_control_gradient(*l2_gradient);
+    }
+
+
+
+    template <int dim>
+    std::map<std::string, double>
+    Manager<dim>::complete_initial_temperature_control_gradient(
+      LinearAlgebra::Vector &l2_gradient)
+    {
+      AssertThrow(time_dependent_temperature_workflow_enabled()
+                  && initial_temperature_optimization.control_space != nullptr,
+                  ExcMessage("A completed initial-temperature forward evaluation is required "
+                             "before its reverse gradient can be requested."));
+
+      // Reverse evaluation reconstructs/reclaims trajectory data and writes
+      // ordinary adjoint artifacts. Suppress those external side effects for
+      // optimizer callbacks while retaining the in-memory objective/gradient.
+      suppress_evaluation_side_effects = true;
+      try
+        {
+          finalize_time_dependent_temperature();
+        }
+      catch (...)
+        {
+          suppress_evaluation_side_effects = false;
+          throw;
+        }
+      suppress_evaluation_side_effects = false;
+
+      // The reverse sweep returns a full-space covector dJ/dT_0. First apply
+      // P^T to obtain the reduced covector, then solve
+      // (P^T M_T P) g=P^T dJ/dT_0 for the L2 Riesz representative expected by
+      // ROLReducedL2Vector.
+      l2_gradient.reinit(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                         this->get_mpi_communicator());
+      LinearAlgebra::Vector reduced_covector(
+        initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+        this->get_mpi_communicator());
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      initial_temperature_optimization.control_space->restrict_covector(
+        time_dependent_workflow.initial_temperature_gradient.block(temperature_block), reduced_covector);
+      const QGauss<dim> mass_quadrature(simulator->dof_handler.get_fe().degree + 1);
+      initial_temperature_optimization.control_space->assemble_mass_matrix(*simulator->mapping, mass_quadrature);
+      initial_temperature_optimization.control_space->solve_l2_riesz(reduced_covector, l2_gradient);
+      return get_objective_values();
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_initial_temperature_control_reuse_diagnostic()
+    {
+      AssertThrow(initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("The O3 reuse diagnostic requires a captured baseline."));
+      restore_optimization_initial_state();
+      simulator->compute_current_constraints();
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      types::global_dof_index temperature_block_first_dof = 0;
+      for (unsigned int block = 0; block < temperature_block; ++block)
+        temperature_block_first_dof += this->introspection().system_dofs_per_block[block];
+      initial_temperature_optimization.control_space = std::make_unique<InitialTemperatureControl<dim>>(
+                                                         simulator->dof_handler, this->introspection().component_masks.temperature,
+                                                         simulator->current_constraints, this->get_mpi_communicator(),
+                                                         temperature_block_first_dof,
+                                                         this->introspection().index_sets.system_partitioning[temperature_block],
+                                                         this->introspection().index_sets.system_relevant_partitioning[temperature_block]);
+      LinearAlgebra::Vector m0(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                               this->get_mpi_communicator());
+      m0 = 0.0;
+      LinearAlgebra::Vector m1(m0);
+      for (const auto index : m1.locally_owned_elements())
+        m1[index] = 1e-3;
+      m1.compress(VectorOperation::insert);
+      LinearAlgebra::Vector g0;
+      LinearAlgebra::Vector g1;
+      LinearAlgebra::Vector g0_again;
+      LinearAlgebra::Vector g1_again;
+      LinearAlgebra::Vector g0_final;
+      LinearAlgebra::Vector raw_g0;
+      LinearAlgebra::Vector raw_g1;
+      LinearAlgebra::Vector raw_g0_again;
+      LinearAlgebra::Vector raw_g1_again;
+      LinearAlgebra::Vector raw_g0_final;
+      const auto evaluate = [this, &temperature_block](
+                              const LinearAlgebra::Vector &control,
+                              LinearAlgebra::Vector &l2_gradient,
+                              LinearAlgebra::Vector &raw_gradient)
+      {
+        const auto objective = evaluate_initial_temperature_control(control, &l2_gradient);
+        raw_gradient.reinit(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                            this->get_mpi_communicator());
+        initial_temperature_optimization.control_space->restrict_covector(
+          time_dependent_workflow.initial_temperature_gradient.block(temperature_block), raw_gradient);
+        return objective;
+      };
+      const auto j0 = evaluate(m0, g0, raw_g0);
+      const auto j1 = evaluate(m1, g1, raw_g1);
+      const auto j0_again = evaluate(m0, g0_again, raw_g0_again);
+      const auto j1_again = evaluate(m1, g1_again, raw_g1_again);
+      const auto j0_final = evaluate(m0, g0_final, raw_g0_final);
+      AssertThrow(j0 == j0_again && j0 == j0_final && j1 == j1_again,
+                  ExcMessage("O3 reuse diagnostic found non-reproducible terminal objectives."));
+      AssertThrow(j0 != j1,
+                  ExcMessage("O3 reuse diagnostic control perturbation did not change the terminal objective."));
+
+      const auto relative_difference = [](const LinearAlgebra::Vector &reference,
+                                          const LinearAlgebra::Vector &comparison)
+      {
+        LinearAlgebra::Vector difference(reference);
+        difference -= comparison;
+        return difference.l2_norm()
+               / std::max(reference.l2_norm(), std::numeric_limits<double>::min());
+      };
+      const double l2_m0_difference = std::max(relative_difference(g0, g0_again),
+                                               relative_difference(g0, g0_final));
+      const double l2_m1_difference = relative_difference(g1, g1_again);
+      const double raw_m0_difference = std::max(relative_difference(raw_g0, raw_g0_again),
+                                                relative_difference(raw_g0, raw_g0_final));
+      const double raw_m1_difference = relative_difference(raw_g1, raw_g1_again);
+      AssertThrow(l2_m0_difference <= 1e-10 && l2_m1_difference <= 1e-10,
+                  ExcMessage("O3 reuse diagnostic found a non-reproducible L2 gradient."));
+      AssertThrow(raw_m0_difference <= 1e-10 && raw_m1_difference <= 1e-10,
+                  ExcMessage("O3 reuse diagnostic found a non-reproducible reduced raw covector."));
+      this->get_pcout() << "ASPECT_O3_REUSE_DIAGNOSTIC objectives=" << j0.size()
+                        << " l2_m0_relative_difference=" << l2_m0_difference
+                        << " l2_m1_relative_difference=" << l2_m1_difference
+                        << " raw_m0_relative_difference=" << raw_m0_difference
+                        << " raw_m1_relative_difference=" << raw_m1_difference
+                        << " control_difference=" << m1.l2_norm() << std::endl;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_initial_temperature_control_single_evaluation_diagnostic()
+    {
+      AssertThrow(initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("The O3 single-evaluation diagnostic requires a captured baseline."));
+      restore_optimization_initial_state();
+      simulator->compute_current_constraints();
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      types::global_dof_index temperature_block_first_dof = 0;
+      for (unsigned int block = 0; block < temperature_block; ++block)
+        temperature_block_first_dof += this->introspection().system_dofs_per_block[block];
+      initial_temperature_optimization.control_space = std::make_unique<InitialTemperatureControl<dim>>(
+                                                         simulator->dof_handler, this->introspection().component_masks.temperature,
+                                                         simulator->current_constraints, this->get_mpi_communicator(),
+                                                         temperature_block_first_dof,
+                                                         this->introspection().index_sets.system_partitioning[temperature_block],
+                                                         this->introspection().index_sets.system_relevant_partitioning[temperature_block]);
+      LinearAlgebra::Vector m0(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                               this->get_mpi_communicator());
+      m0 = 0.0;
+      LinearAlgebra::Vector l2_gradient;
+      const auto objective = evaluate_initial_temperature_control(m0, &l2_gradient);
+      LinearAlgebra::Vector raw_gradient(
+        initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+        this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->restrict_covector(
+        time_dependent_workflow.initial_temperature_gradient.block(temperature_block), raw_gradient);
+      this->get_pcout() << "ASPECT_O3_SINGLE_DIAGNOSTIC objectives=" << objective.size()
+                        << " raw_gradient_norm=" << raw_gradient.l2_norm()
+                        << " l2_gradient_norm=" << l2_gradient.l2_norm()
+                        << std::endl;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_initial_temperature_control_taylor_diagnostic()
+    {
+      AssertThrow(initial_temperature_optimization.canonical_state.captured,
+                  ExcMessage("The O3 Taylor diagnostic requires a captured baseline."));
+      restore_optimization_initial_state();
+      simulator->compute_current_constraints();
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      types::global_dof_index temperature_block_first_dof = 0;
+      for (unsigned int block = 0; block < temperature_block; ++block)
+        temperature_block_first_dof += this->introspection().system_dofs_per_block[block];
+      initial_temperature_optimization.control_space = std::make_unique<InitialTemperatureControl<dim>>(
+                                                         simulator->dof_handler, this->introspection().component_masks.temperature,
+                                                         simulator->current_constraints, this->get_mpi_communicator(),
+                                                         temperature_block_first_dof,
+                                                         this->introspection().index_sets.system_partitioning[temperature_block],
+                                                         this->introspection().index_sets.system_relevant_partitioning[temperature_block]);
+
+      LinearAlgebra::Vector m0(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                               this->get_mpi_communicator());
+      m0 = 0.0;
+      LinearAlgebra::Vector direction(m0);
+      for (const auto index : direction.locally_owned_elements())
+        direction[index] = 1.0 + static_cast<double>(index % 3);
+      direction.compress(VectorOperation::insert);
+
+      LinearAlgebra::Vector l2_gradient;
+      const auto objective_at_m0 = evaluate_initial_temperature_control(m0, &l2_gradient);
+      AssertThrow(objective_at_m0.size() == 1,
+                  ExcMessage("The O3 Taylor diagnostic requires exactly one objective."));
+      const double j0 = objective_at_m0.begin()->second;
+      LinearAlgebra::Vector raw_gradient(
+        initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+        this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->restrict_covector(
+        time_dependent_workflow.initial_temperature_gradient.block(temperature_block), raw_gradient);
+      LinearAlgebra::Vector mass_times_direction(direction);
+      initial_temperature_optimization.control_space->mass_matrix()->vmult(mass_times_direction, direction);
+      const double raw_directional_derivative = raw_gradient * direction;
+      const double l2_directional_derivative = l2_gradient * mass_times_direction;
+      const double derivative_scale = std::max({std::fabs(raw_directional_derivative),
+                                                std::fabs(l2_directional_derivative),
+                                                std::numeric_limits<double>::min()
+                                               });
+      const double derivative_relative_difference =
+        std::fabs(raw_directional_derivative - l2_directional_derivative) / derivative_scale;
+      AssertThrow(derivative_relative_difference <= 1e-10,
+                  ExcMessage("O3 Taylor diagnostic found inconsistent raw and L2 directional derivatives."));
+
+      const std::vector<double> step_lengths = {1e-3, 5e-4, 2.5e-4, 1.25e-4};
+      std::vector<double> remainders;
+      remainders.reserve(step_lengths.size());
+      for (const double step_length : step_lengths)
+        {
+          LinearAlgebra::Vector control(m0);
+          control.add(step_length, direction);
+          const auto objective = evaluate_initial_temperature_control(control);
+          AssertThrow(objective.size() == 1,
+                      ExcMessage("The O3 Taylor diagnostic requires exactly one objective."));
+          const double remainder = std::fabs(objective.begin()->second - j0
+                                             - step_length * raw_directional_derivative);
+          remainders.push_back(remainder);
+          this->get_pcout() << "ASPECT_O3_TAYLOR_DIAGNOSTIC h=" << step_length
+                            << " objective_difference=" << objective.begin()->second - j0
+                            << " remainder=" << remainder << std::endl;
+        }
+      for (unsigned int i = 1; i < remainders.size(); ++i)
+        AssertThrow(remainders[i] < remainders[i-1],
+                    ExcMessage("O3 Taylor diagnostic did not show a decreasing first-order remainder."));
+      const double final_order = std::log(remainders[remainders.size()-2]
+                                          / remainders.back()) / std::log(2.0);
+      AssertThrow(final_order >= 1.5,
+                  ExcMessage("O3 Taylor diagnostic did not show second-order remainder convergence."));
+      this->get_pcout() << "ASPECT_O3_TAYLOR_DIAGNOSTIC raw_directional_derivative="
+                        << raw_directional_derivative
+                        << " l2_directional_derivative=" << l2_directional_derivative
+                        << " derivative_relative_difference=" << derivative_relative_difference
+                        << " final_order=" << final_order << std::endl;
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_initial_temperature_control_initialization_diagnostic(
+      const unsigned int stage)
+    {
+      AssertThrow(stage >= 1 && stage <= 8,
+                  ExcMessage("O3 initialization diagnostic stage must be in [1,8]."));
+      const auto report_stage_memory = [this](const std::string &stage_name)
+      {
+        std::size_t rss_bytes = 0;
+#if defined(__APPLE__)
+        mach_task_basic_info_data_t task_info_data;
+        mach_msg_type_number_t task_info_count = MACH_TASK_BASIC_INFO_COUNT;
+        if (task_info(mach_task_self(),
+                      MACH_TASK_BASIC_INFO,
+                      reinterpret_cast<task_info_t>(&task_info_data),
+                      &task_info_count) == KERN_SUCCESS)
+          rss_bytes = task_info_data.resident_size;
+#else
+        dealii::Utilities::System::MemoryStats process_memory {};
+        dealii::Utilities::System::get_memory_stats(process_memory);
+        rss_bytes = process_memory.VmRSS * 1024ULL;
+#endif
+        const auto control_global = (initial_temperature_optimization.control_space == nullptr
+                                     ? 0
+                                     : initial_temperature_optimization.control_space->n_control_dofs());
+        const auto control_owned = (initial_temperature_optimization.control_space == nullptr
+                                    ? 0
+                                    : initial_temperature_optimization.control_space->locally_owned_control_dofs()
+                                    .n_elements());
+        std::cerr << "ASPECT_O3_INIT_MEMORY rank="
+                  << dealii::Utilities::MPI::this_mpi_process(this->get_mpi_communicator())
+                  << " stage=" << stage_name
+                  << " rss_bytes=" << rss_bytes
+                  << " solution_global=" << simulator->solution.size()
+                  << " control_global=" << control_global
+                  << " control_owned=" << control_owned
+                  << " reverse_cache_size=" << trajectory_manager.reverse_state_cache.size()
+                  << std::endl;
+      };
+      report_stage_memory("D0");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=0" << std::endl;
+      restore_optimization_initial_state();
+      report_stage_memory("D1");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=1 restore" << std::endl;
+      if (stage == 1)
+        return;
+
+      simulator->compute_current_constraints();
+      report_stage_memory("D2");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=2 constraints" << std::endl;
+      if (stage == 2)
+        return;
+
+      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      types::global_dof_index temperature_block_first_dof = 0;
+      for (unsigned int block = 0; block < temperature_block; ++block)
+        temperature_block_first_dof += this->introspection().system_dofs_per_block[block];
+      initial_temperature_optimization.control_space = std::make_unique<InitialTemperatureControl<dim>>(
+                                                         simulator->dof_handler, this->introspection().component_masks.temperature,
+                                                         simulator->current_constraints, this->get_mpi_communicator(),
+                                                         temperature_block_first_dof,
+                                                         this->introspection().index_sets.system_partitioning[temperature_block],
+                                                         this->introspection().index_sets.system_relevant_partitioning[temperature_block]);
+      initial_temperature_optimization.control_space->assert_temperature_block_mapping();
+      report_stage_memory("D3");
+      std::cout << "ASPECT_O3_INIT_LAYOUT rank="
+                << dealii::Utilities::MPI::this_mpi_process(this->get_mpi_communicator())
+                << " control_global=" << initial_temperature_optimization.control_space->n_control_dofs()
+                << " control_owned="
+                << initial_temperature_optimization.control_space->locally_owned_control_dofs().n_elements()
+                << " temperature_global="
+                << initial_temperature_optimization.control_space->temperature_block_owned_dofs().size()
+                << " temperature_owned="
+                << initial_temperature_optimization.control_space->temperature_block_owned_dofs().n_elements()
+                << std::endl;
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=3 control-space global="
+                        << initial_temperature_optimization.control_space->n_control_dofs()
+                        << " local="
+                        << initial_temperature_optimization.control_space->locally_owned_control_dofs().n_elements()
+                        << std::endl;
+      if (stage == 3)
+        return;
+
+      LinearAlgebra::Vector control(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                                    this->get_mpi_communicator());
+      control = 0.0;
+      report_stage_memory("D4");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=4 control-vector"
+                        << " expected_temperature_size="
+                        << initial_temperature_optimization.control_space->temperature_block_owned_dofs().size()
+                        << " expected_owned="
+                        << initial_temperature_optimization.control_space->temperature_block_owned_dofs().n_elements()
+                        << " solution_temperature_size="
+                        << simulator->solution.block(temperature_block).size()
+                        << " solution_temperature_owned="
+                        << simulator->solution.block(temperature_block).locally_owned_elements().n_elements()
+                        << " fixed_temperature_size=" << initial_temperature_optimization.fixed_temperature->size()
+                        << " fixed_temperature_owned="
+                        << initial_temperature_optimization.fixed_temperature->locally_owned_elements().n_elements()
+                        << std::endl;
+      if (stage == 4)
+        return;
+
+      LinearAlgebra::Vector controlled_temperature(
+        this->introspection().index_sets.system_partitioning[temperature_block],
+        this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->inject_physical(
+        control, *initial_temperature_optimization.fixed_temperature, controlled_temperature);
+      simulator->solution.block(temperature_block) = controlled_temperature;
+      report_stage_memory("D5");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=5 physical-injection" << std::endl;
+      if (stage == 5)
+        return;
+
+      simulator->old_solution.block(temperature_block) =
+        simulator->solution.block(temperature_block);
+      simulator->old_old_solution.block(temperature_block) =
+        simulator->solution.block(temperature_block);
+      simulator->current_linearization_point.block(temperature_block) =
+        simulator->solution.block(temperature_block);
+      report_stage_memory("D6");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=6 histories" << std::endl;
+      if (stage == 6)
+        return;
+
+      simulator->compute_initial_pressure_field();
+      report_stage_memory("D7");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=7 initial-pressure" << std::endl;
+      if (stage == 7)
+        return;
+
+      simulator->initialize_current_linearization_point();
+      simulator->rebuild_sparsity_and_matrices = true;
+      simulator->rebuild_stokes_matrix = true;
+      simulator->rebuild_stokes_preconditioner = true;
+      report_stage_memory("D8");
+      this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=8 runtime-invalidation" << std::endl;
+    }
+
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) template class Adjoint::Manager<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/optimization/initial_temperature_manager.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/optimization/initial_temperature_optimization.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#include <aspect/adjoint/optimization/initial_temperature_optimization.h>
+
+#include <aspect/adjoint/core/manager.h>
+#include <aspect/adjoint/optimization/optimization_parameters.h>
+#include <aspect/adjoint/optimization/rol_reduced_objective.h>
+#include <aspect/adjoint/optimization/rol_vector.h>
+
+#include <ROL_TypeB_LinMoreAlgorithm.hpp>
+#include <ROL_lBFGS.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <sstream>
+#include <vector>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    void
+    InitialTemperatureOptimization<dim>::declare_parameters(ParameterHandler &prm)
+    {
+      prm.enter_subsection("Adjoint");
+      {
+        prm.declare_entry("Solve mode", "kernel", Patterns::Selection("kernel|optimize"),
+                          "Run the ordinary adjoint kernel or the opt-in reduced "
+                          "initial-temperature ROL optimization.");
+        prm.enter_subsection("Optimization");
+        {
+          prm.declare_entry("Maximum iterations", "1", Patterns::Integer(0));
+          prm.declare_entry("Gradient tolerance", "1e-8", Patterns::Double(0.0));
+          prm.declare_entry("Step tolerance", "1e-12", Patterns::Double(0.0));
+          prm.declare_entry("Initial trust-region radius", "1e-3", Patterns::Double(0.0));
+          prm.declare_entry("L-BFGS history size", "3", Patterns::Integer(1));
+          prm.declare_entry("Lower bound", "-1e-2", Patterns::Double());
+          prm.declare_entry("Upper bound", "1e-2", Patterns::Double());
+          prm.declare_entry("Output verbosity", "0", Patterns::Integer(0));
+          prm.declare_entry("Use physical temperature bounds", "false", Patterns::Bool(),
+                            "Use the per-control bounds induced by 0 <= T_fixed + Pm <= 1 "
+                            "instead of uniform increment bounds.");
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    void
+    InitialTemperatureOptimization<dim>::parse_parameters(ParameterHandler &prm)
+    {
+      prm.enter_subsection("Adjoint");
+      {
+        const std::string solve_mode = prm.get("Solve mode");
+        optimization_enabled = (solve_mode == "optimize");
+        AssertThrow(solve_mode == "kernel" || solve_mode == "optimize",
+                    ExcMessage("Unknown adjoint solve mode."));
+
+        prm.enter_subsection("Optimization");
+        {
+          maximum_iterations = prm.get_integer("Maximum iterations");
+          gradient_tolerance = prm.get_double("Gradient tolerance");
+          step_tolerance = prm.get_double("Step tolerance");
+          initial_trust_region_radius = prm.get_double("Initial trust-region radius");
+          lbfgs_history_size = prm.get_integer("L-BFGS history size");
+          lower_bound = prm.get_double("Lower bound");
+          upper_bound = prm.get_double("Upper bound");
+          output_verbosity = prm.get_integer("Output verbosity");
+          use_physical_temperature_bounds = prm.get_bool("Use physical temperature bounds");
+          validate_initial_temperature_optimization_parameters(
+            lbfgs_history_size,
+            gradient_tolerance,
+            step_tolerance,
+            initial_trust_region_radius,
+            lower_bound,
+            upper_bound);
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    bool
+    InitialTemperatureOptimization<dim>::enabled() const
+    {
+      return optimization_enabled;
+    }
+
+
+
+    template <int dim>
+    void
+    InitialTemperatureOptimization<dim>::run(Manager<dim> &adjoint_manager) const
+    {
+      AssertThrow(optimization_enabled
+                  && adjoint_manager.has_optimization_initial_state(),
+                  ExcMessage("Optimization requires the captured initial-temperature baseline."));
+
+      // Optimize the reduced functional j(c)=J(T_0=T_fixed+P c). The vector
+      // space uses <x,y>=x^T(P^T M_T P)y, so ROL norms, gradients, and trust-
+      // region radii all have the physical temperature L2 interpretation.
+      const auto &space = adjoint_manager.get_initial_temperature_control_space();
+      const auto mass = space.mass_matrix();
+      ROLReducedL2Vector x(space.locally_owned_control_dofs(),
+                           this->get_mpi_communicator(), mass);
+      ROLReducedL2Vector gradient(space.locally_owned_control_dofs(),
+                                  this->get_mpi_communicator(), mass);
+      x.setScalar(0.0);
+
+      LinearAlgebra::Vector lower(x.get_vector()), upper(x.get_vector());
+      if (use_physical_temperature_bounds)
+        {
+          // Convert 0<=T_fixed+P c<=1 into per-free-coordinate bounds. With
+          // uniform increment bounds, the user instead bounds c directly.
+          const auto physical_bounds =
+            adjoint_manager.initial_temperature_control_physical_bounds();
+          lower = physical_bounds.first;
+          upper = physical_bounds.second;
+        }
+      else
+        {
+          lower = lower_bound;
+          upper = upper_bound;
+        }
+
+      ROLDistributedBoundConstraint bounds(lower, upper);
+      AssertThrow(bounds.isFeasible(x),
+                  ExcMessage("The initial reduced control violates optimization bounds."));
+
+      ROL::ParameterList parameters;
+      // Lin-More is a bound-constrained trust-region method. The reduced
+      // objective intentionally supplies first derivatives only; L-BFGS builds
+      // a secant Hessian approximation from accepted (s,y) pairs and is not
+      // also installed as a preconditioner.
+      parameters.sublist("Status Test").set("Iteration Limit",
+                                            static_cast<int>(maximum_iterations));
+      parameters.sublist("Status Test").set("Gradient Tolerance", gradient_tolerance);
+      parameters.sublist("Status Test").set("Step Tolerance", step_tolerance);
+      parameters.sublist("Step").sublist("Trust Region").set(
+        "Initial Radius", initial_trust_region_radius);
+      parameters.sublist("General").sublist("Secant").set(
+        "Type", std::string("Limited-Memory BFGS"));
+      parameters.sublist("General").sublist("Secant").set(
+        "Maximum Storage", static_cast<int>(lbfgs_history_size));
+      parameters.sublist("General").sublist("Secant").set("Use as Hessian", true);
+      parameters.sublist("General").sublist("Secant").set("Use as Preconditioner", false);
+
+      auto lbfgs = ROL::makePtr<ROL::lBFGS<double>>(lbfgs_history_size, true, 1.0);
+      ROL::Ptr<ROL::Secant<double>> secant = lbfgs;
+      ROL::TypeB::LinMoreAlgorithm<double> algorithm(parameters, secant);
+      ROLReducedObjective<dim> objective(adjoint_manager);
+      std::ostringstream output;
+      algorithm.run(x, gradient, objective, bounds, output);
+
+      // Report callback counts as lifecycle invariants: a cached value/gradient
+      // pair should share one forward generation, reverted trials must not
+      // silently consume another trajectory, and hessVec must remain unused.
+      const auto state = algorithm.getState();
+      const unsigned int lbfgs_pairs =
+        static_cast<unsigned int>(std::max(0,
+                                           static_cast<const ROL::Secant<double> &>(*lbfgs)
+                                           .get_state()->current + 1));
+      this->get_pcout() << "ASPECT_O6_OPTIMIZE iter=" << state->iter
+                        << " value=" << state->value
+                        << " gnorm=" << state->gnorm
+                        << " forward=" << objective.forward_evaluations()
+                        << " reverse=" << objective.reverse_evaluations()
+                        << " lbfgs_pairs=" << lbfgs_pairs
+                        << " update_initial=" << objective.initial_updates()
+                        << " update_trial=" << objective.trial_updates()
+                        << " update_revert=" << objective.revert_updates()
+                        << " update_accept=" << objective.accept_updates()
+                        << " precond=" << objective.preconditioner_calls()
+                        << " hessvec=" << objective.hessvec_calls()
+                        << " inv_hessvec=" << objective.inverse_hessvec_calls()
+                        << " cache_hits=" << objective.cache_hits()
+                        << " cache_misses=" << objective.cache_misses() << std::endl;
+
+      if (output_verbosity == 0)
+        return;
+
+      // A new adapter deliberately cannot reuse the optimizer callback cache.
+      // Its value/gradient pair therefore qualifies the final accepted state
+      // through an independent forward and reverse evaluation.
+      ROLReducedObjective<dim> fresh_objective(adjoint_manager);
+      ROLReducedL2Vector fresh_gradient(x.get_vector(), mass);
+      double tolerance = 1e-14;
+      const double fresh_value = fresh_objective.value(x, tolerance);
+      fresh_objective.gradient(fresh_gradient, x, tolerance);
+
+      const auto *final_gradient =
+        dynamic_cast<const ROLReducedL2Vector *>(state->gradientVec.get());
+      AssertThrow(final_gradient != nullptr,
+                  ExcMessage("Lin-More did not retain an L2 final gradient."));
+      ROLReducedL2Vector gradient_difference(final_gradient->get_vector(), mass);
+      gradient_difference.axpy(-1.0, fresh_gradient);
+      double local_max_coefficient_difference = 0.0;
+      for (const auto index : gradient_difference.get_vector().locally_owned_elements())
+        local_max_coefficient_difference =
+          std::max(local_max_coefficient_difference,
+                   std::abs(gradient_difference.get_vector()[index]));
+      const double max_coefficient_difference =
+        Utilities::MPI::max(local_max_coefficient_difference,
+                            this->get_mpi_communicator());
+      const double gradient_relative_difference =
+        gradient_difference.norm()
+        / std::max(fresh_gradient.norm(), std::numeric_limits<double>::min());
+      AssertThrow(gradient_relative_difference <= 1e-11,
+                  ExcMessage("The final optimizer gradient differs from a fresh ROL evaluation."));
+
+      ROLReducedL2Vector direction(x.get_vector(), mass);
+      for (const auto index : direction.get_vector().locally_owned_elements())
+        direction.get_vector()[index] = 1.0 + static_cast<double>(index % 3);
+      direction.get_vector().compress(VectorOperation::insert);
+      direction.scale(1.0 / direction.norm());
+
+      double local_maximum_feasible_step = std::numeric_limits<double>::max();
+      for (const auto index : direction.get_vector().locally_owned_elements())
+        if (direction.get_vector()[index] > 0.0)
+          local_maximum_feasible_step =
+            std::min(local_maximum_feasible_step,
+                     (upper[index] - x.get_vector()[index]) / direction.get_vector()[index]);
+        else if (direction.get_vector()[index] < 0.0)
+          local_maximum_feasible_step =
+            std::min(local_maximum_feasible_step,
+                     (lower[index] - x.get_vector()[index]) / direction.get_vector()[index]);
+      const double maximum_feasible_step =
+        Utilities::MPI::min(local_maximum_feasible_step,
+                            this->get_mpi_communicator());
+      const double initial_taylor_step =
+        std::min(1e-3, 0.25 * maximum_feasible_step);
+      AssertThrow(initial_taylor_step > 0.0,
+                  ExcMessage("The final optimizer point admits no feasible Taylor perturbation."));
+
+      this->get_pcout() << "ASPECT_O6_FRESH_GRADIENT value=" << fresh_value
+                        << " relative_l2_difference=" << gradient_relative_difference
+                        << " max_coefficient_difference=" << max_coefficient_difference
+                        << std::endl;
+
+      // The L2 vector dot product gives j'(c)[d]=<grad_L2 j,d>_L2. For a correct
+      // discrete adjoint, the Taylor remainder
+      //   |j(c+h d)-j(c)-h j'(c)[d]|
+      // decreases as O(h^2) while the active bound set remains unchanged.
+      const double directional_derivative = fresh_gradient.dot(direction);
+      std::vector<double> remainders;
+      remainders.reserve(5);
+      for (unsigned int level = 0; level < 5; ++level)
+        {
+          const double step = std::ldexp(initial_taylor_step,
+                                         -static_cast<int>(level));
+          ROLReducedL2Vector perturbed(x.get_vector(), mass);
+          perturbed.axpy(step, direction);
+          const double perturbed_value = fresh_objective.value(perturbed, tolerance);
+          const double delta = perturbed_value - fresh_value;
+          const double linear = step * directional_derivative;
+          const double remainder = std::abs(delta - linear);
+          remainders.push_back(remainder);
+          const double observed_order =
+            (level == 0 ? 0.0
+             : std::log(remainders[level-1] / remainder) / std::log(2.0));
+          this->get_pcout() << "ASPECT_O6_TAYLOR h=" << step
+                            << " delta=" << delta
+                            << " linear=" << linear
+                            << " remainder=" << remainder
+                            << " order=" << observed_order << std::endl;
+        }
+      AssertThrow(remainders[3] > remainders[4]
+                  && std::log(remainders[3] / remainders[4]) / std::log(2.0) >= 1.5,
+                  ExcMessage("The final production ROL Taylor check is not second order."));
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) template class Adjoint::InitialTemperatureOptimization<dim>;
+  ASPECT_INSTANTIATE(INSTANTIATE)
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/optimization/initial_temperature_optimization.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/optimization/rol_reduced_objective.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+*/
+
+#include <aspect/adjoint/optimization/rol_reduced_objective.h>
+#include <aspect/adjoint/core/manager.h>
+
+#include <deal.II/base/utilities.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    ROLReducedObjective<dim>::ROLReducedObjective(Manager<dim> &manager)
+      : manager(manager)
+      , cached_objective(0.0)
+      , cached_value_is_valid(false)
+      , cached_gradient_is_valid(false)
+      , forward_trajectory_is_live(false)
+      , current_generation_id(0)
+      , next_generation_id(0)
+      , accepted_objective(0.0)
+      , accepted_value_is_valid(false)
+      , accepted_gradient_is_valid(false)
+      , accepted_generation_id(0)
+      , n_cache_hits(0)
+      , n_cache_misses(0)
+      , n_value_calls(0)
+      , n_gradient_calls(0)
+      , n_forward_evaluations(0)
+      , n_reverse_evaluations(0)
+    {}
+
+
+
+    template <int dim>
+    const ROLReducedL2Vector &
+    ROLReducedObjective<dim>::as_l2_control(const ROL::Vector<double> &vector)
+    {
+      const auto *result = dynamic_cast<const ROLReducedL2Vector *>(&vector);
+      AssertThrow(result != nullptr,
+                  ExcMessage("ROLReducedObjective requires an L2-metric reduced control vector."));
+      return *result;
+    }
+
+
+
+    template <int dim>
+    ROLReducedL2Vector &
+    ROLReducedObjective<dim>::as_l2_control(ROL::Vector<double> &vector)
+    {
+      auto *result = dynamic_cast<ROLReducedL2Vector *>(&vector);
+      AssertThrow(result != nullptr,
+                  ExcMessage("ROLReducedObjective requires an L2-metric reduced gradient vector."));
+      return *result;
+    }
+
+
+
+    template <int dim>
+    double
+    ROLReducedObjective<dim>::extract_scalar_objective(
+      const std::map<std::string, double> &objectives)
+    {
+      AssertThrow(objectives.size() == 1,
+                  ExcMessage("ROLReducedObjective requires exactly one active scalar objective."));
+      return objectives.begin()->second;
+    }
+
+
+
+    template <int dim>
+    bool
+    ROLReducedObjective<dim>::has_cached_control(const ROLReducedL2Vector &control) const
+    {
+      if (cached_control == nullptr
+          || cached_control->size() != control.get_vector().size()
+          || cached_control->locally_owned_elements()
+          != control.get_vector().locally_owned_elements())
+        return false;
+
+      // Cache identity is exact rather than tolerance-based. A trajectory is
+      // the discrete forward solution for one concrete coefficient vector;
+      // reusing it for a merely close trust-region trial would return a
+      // gradient of a different reduced functional. MPI sum makes the answer
+      // identical on every rank.
+      unsigned int local_difference = 0;
+      for (const auto index : control.get_vector().locally_owned_elements())
+        if ((*cached_control)[index] != control.get_vector()[index])
+          {
+            local_difference = 1;
+            break;
+          }
+
+      return dealii::Utilities::MPI::sum(
+               local_difference, control.get_vector().get_mpi_communicator()) == 0;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::invalidate_live_forward_if_control_changed(
+      const ROLReducedL2Vector &control)
+    {
+      if (!has_cached_control(control))
+        forward_trajectory_is_live = false;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::begin_generation(const ROLReducedL2Vector &control,
+                                               const double objective)
+    {
+      // A generation is the complete forward trajectory associated with one
+      // control. ROL may ask for value and gradient separately; preserving
+      // this identity lets gradient() run the reverse sweep on this exact
+      // trajectory instead of silently evaluating a second forward solve.
+      if (cached_control == nullptr)
+        cached_control = std::make_unique<LinearAlgebra::Vector>(control.get_vector());
+      else
+        *cached_control = control.get_vector();
+
+      cached_objective = objective;
+      cached_value_is_valid = true;
+      cached_gradient_is_valid = false;
+      cached_l2_gradient.reset();
+      forward_trajectory_is_live = true;
+      current_generation_id = ++next_generation_id;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::save_accepted_generation()
+    {
+      // A trust-region trial can be reverted. Preserve the last accepted
+      // value/gradient pair before invalidating the live trajectory, so the
+      // Revert event restores a mathematically consistent callback cache.
+      if (accepted_value_is_valid || !cached_value_is_valid)
+        return;
+
+      accepted_control = std::make_unique<LinearAlgebra::Vector>(*cached_control);
+      accepted_l2_gradient = cached_l2_gradient == nullptr
+                             ? nullptr
+                             : std::make_unique<LinearAlgebra::Vector>(*cached_l2_gradient);
+      accepted_objective = cached_objective;
+      accepted_value_is_valid = true;
+      accepted_gradient_is_valid = cached_gradient_is_valid;
+      accepted_generation_id = current_generation_id;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::restore_accepted_generation()
+    {
+      // The restored trajectory itself is not live: a later gradient request
+      // must rebuild it unless it already has a cached L2 representative.
+      if (!accepted_value_is_valid)
+        return;
+
+      cached_control = std::make_unique<LinearAlgebra::Vector>(*accepted_control);
+      cached_l2_gradient = accepted_l2_gradient == nullptr
+                           ? nullptr
+                           : std::make_unique<LinearAlgebra::Vector>(*accepted_l2_gradient);
+      cached_objective = accepted_objective;
+      cached_value_is_valid = true;
+      cached_gradient_is_valid = accepted_gradient_is_valid;
+      forward_trajectory_is_live = false;
+      current_generation_id = accepted_generation_id;
+      discard_accepted_generation();
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::discard_accepted_generation()
+    {
+      accepted_control.reset();
+      accepted_l2_gradient.reset();
+      accepted_value_is_valid = false;
+      accepted_gradient_is_valid = false;
+      accepted_generation_id = 0;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::update(const ROL::Vector<double> &x,
+                                     const ROL::UpdateType type,
+                                     const int)
+    {
+      const ROLReducedL2Vector &control = as_l2_control(x);
+      switch (type)
+        {
+          case ROL::UpdateType::Initial:
+            ++n_initial_updates;
+            cached_control.reset();
+            cached_l2_gradient.reset();
+            cached_value_is_valid = false;
+            cached_gradient_is_valid = false;
+            forward_trajectory_is_live = false;
+            current_generation_id = 0;
+            discard_accepted_generation();
+            break;
+
+          case ROL::UpdateType::Trial:
+            ++n_trial_updates;
+          case ROL::UpdateType::Temp:
+            // ROL uses both Trial and Temp while probing a trust region. Both
+            // are provisional and therefore preserve the accepted cache.
+            save_accepted_generation();
+            invalidate_live_forward_if_control_changed(control);
+            break;
+
+          case ROL::UpdateType::Revert:
+            ++n_revert_updates;
+            restore_accepted_generation();
+            invalidate_live_forward_if_control_changed(control);
+            break;
+
+          case ROL::UpdateType::Accept:
+            ++n_accept_updates;
+            // Acceptance changes the optimizer's reference point. The next
+            // callback may reuse the matching cache, but any old accepted
+            // backup is now obsolete.
+            invalidate_live_forward_if_control_changed(control);
+            discard_accepted_generation();
+            break;
+        }
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::update(const ROL::Vector<double> &x,
+                                     const bool flag,
+                                     const int)
+    {
+      if (flag)
+        invalidate_live_forward_if_control_changed(as_l2_control(x));
+    }
+
+
+
+    template <int dim>
+    double
+    ROLReducedObjective<dim>::value(const ROL::Vector<double> &x, double & /* tolerance */)
+    {
+      const ROLReducedL2Vector &control = as_l2_control(x);
+      ++n_value_calls;
+      if (cached_value_is_valid && has_cached_control(control))
+        {
+          ++n_cache_hits;
+          return cached_objective;
+        }
+
+      // A miss performs the forward half of the reduced map
+      // c -> T_0(c) -> trajectory -> J. Manager intentionally leaves that
+      // trajectory live so an immediately following gradient callback can
+      // execute only the reverse half.
+      ++n_cache_misses;
+      ++n_forward_evaluations;
+      const double objective = extract_scalar_objective(
+                                 manager.evaluate_initial_temperature_control(control.get_vector()));
+      begin_generation(control, objective);
+      return objective;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::gradient(ROL::Vector<double> &g,
+                                       const ROL::Vector<double> &x,
+                                       double & /* tolerance */)
+    {
+      const ROLReducedL2Vector &control = as_l2_control(x);
+      ROLReducedL2Vector &gradient = as_l2_control(g);
+      AssertThrow(gradient.has_same_layout(control)
+                  && gradient.mass_matrix() == control.mass_matrix(),
+                  ExcMessage("ROLReducedObjective requires control and gradient vectors "
+                             "with the same reduced L2 metric."));
+      if (cached_gradient_is_valid && has_cached_control(control))
+        {
+          gradient.get_vector() = *cached_l2_gradient;
+          ++n_cache_hits;
+          ++n_gradient_calls;
+          return;
+        }
+
+      LinearAlgebra::Vector l2_gradient;
+      if (cached_value_is_valid && forward_trajectory_is_live && has_cached_control(control))
+        {
+          // Reuse the exact forward generation created by value(). The manager
+          // returns the L2 Riesz representative g satisfying
+          // dJ(c)[s]=s^T M_c g, not the raw Euclidean covector P^T dJ/dT_0.
+          ++n_cache_hits;
+          manager.complete_initial_temperature_control_gradient(l2_gradient);
+          forward_trajectory_is_live = false;
+        }
+      else
+        {
+          // The live trajectory was consumed, reverted, or belongs to another
+          // control. Evaluate forward and reverse as one transaction; this is
+          // more expensive but preserves the reduced-gradient identity.
+          ++n_cache_misses;
+          ++n_forward_evaluations;
+          const double objective = extract_scalar_objective(
+                                     manager.evaluate_initial_temperature_control(control.get_vector(), &l2_gradient));
+          begin_generation(control, objective);
+          forward_trajectory_is_live = false;
+        }
+      AssertThrow(l2_gradient.size() == gradient.get_vector().size()
+                  && l2_gradient.locally_owned_elements()
+                  == gradient.get_vector().locally_owned_elements(),
+                  ExcMessage("The O3 L2 gradient does not match the ROL reduced layout."));
+      gradient.get_vector() = l2_gradient;
+      // The gradient vector is tied to the same generation as cached_objective
+      // and can be reused even after its on-disk trajectory is no longer live.
+      cached_l2_gradient = std::make_unique<LinearAlgebra::Vector>(l2_gradient);
+      cached_gradient_is_valid = true;
+      ++n_gradient_calls;
+      ++n_reverse_evaluations;
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::hessVec(ROL::Vector<double> &,
+                                      const ROL::Vector<double> &,
+                                      const ROL::Vector<double> &,
+                                      double &)
+    {
+      ++n_hessvec_calls;
+      AssertThrow(false,
+                  ExcMessage("ROLReducedObjective::hessVec is intentionally unsupported; "
+                             "Lin-More must use its external L-BFGS secant model."));
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::invHessVec(ROL::Vector<double> &,
+                                         const ROL::Vector<double> &,
+                                         const ROL::Vector<double> &,
+                                         double &)
+    {
+      ++n_inverse_hessvec_calls;
+      AssertThrow(false,
+                  ExcMessage("ROLReducedObjective::invHessVec is intentionally unsupported."));
+    }
+
+
+
+    template <int dim>
+    void
+    ROLReducedObjective<dim>::precond(ROL::Vector<double> &pv,
+                                      const ROL::Vector<double> &v,
+                                      const ROL::Vector<double> &,
+                                      double &)
+    {
+      // ROL vectors already encode the reduced L2 metric through dot() and
+      // dual(). At this objective layer the natural preconditioner is thus the
+      // identity in that Hilbert space; applying another mass inverse would
+      // double-count the Riesz map.
+      ++n_preconditioner_calls;
+      as_l2_control(pv).set(as_l2_control(v));
+    }
+
+
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::value_calls() const
+    {
+      return n_value_calls;
+    }
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::gradient_calls() const
+    {
+      return n_gradient_calls;
+    }
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::forward_evaluations() const
+    {
+      return n_forward_evaluations;
+    }
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::reverse_evaluations() const
+    {
+      return n_reverse_evaluations;
+    }
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::cache_hits() const
+    {
+      return n_cache_hits;
+    }
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::cache_misses() const
+    {
+      return n_cache_misses;
+    }
+
+    template <int dim>
+    unsigned int ROLReducedObjective<dim>::generation_id() const
+    {
+      return current_generation_id;
+    }
+
+    template <int dim> unsigned int ROLReducedObjective<dim>::initial_updates() const
+    {
+      return n_initial_updates;
+    }
+    template <int dim> unsigned int ROLReducedObjective<dim>::trial_updates() const
+    {
+      return n_trial_updates;
+    }
+    template <int dim> unsigned int ROLReducedObjective<dim>::revert_updates() const
+    {
+      return n_revert_updates;
+    }
+    template <int dim> unsigned int ROLReducedObjective<dim>::accept_updates() const
+    {
+      return n_accept_updates;
+    }
+    template <int dim> unsigned int ROLReducedObjective<dim>::preconditioner_calls() const
+    {
+      return n_preconditioner_calls;
+    }
+    template <int dim> unsigned int ROLReducedObjective<dim>::hessvec_calls() const
+    {
+      return n_hessvec_calls;
+    }
+    template <int dim> unsigned int ROLReducedObjective<dim>::inverse_hessvec_calls() const
+    {
+      return n_inverse_hessvec_calls;
+    }
+
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) template class Adjoint::ROLReducedObjective<dim>;
+  ASPECT_INSTANTIATE(INSTANTIATE)
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/optimization/rol_reduced_objective.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/optimization/rol_vector.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/optimization/rol_vector.h>
+
+#include <algorithm>
+#include <climits>
+#include <cstdint>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace
+    {
+      bool
+      communicators_are_compatible(const MPI_Comm first,
+                                   const MPI_Comm second)
+      {
+        // Congruent communicators have identical process groups and rank
+        // ordering even when they are different MPI handles. That is exactly
+        // the compatibility needed for entrywise distributed vector algebra.
+        int comparison = MPI_UNEQUAL;
+        const int error = MPI_Comm_compare(first, second, &comparison);
+        AssertThrow(error == MPI_SUCCESS,
+                    ExcMessage("Unable to compare MPI communicators for ROL vectors."));
+        return comparison == MPI_IDENT || comparison == MPI_CONGRUENT;
+      }
+
+
+      void
+      finish_owned_write(LinearAlgebra::Vector &vector)
+      {
+        vector.compress(dealii::VectorOperation::insert);
+      }
+    }
+
+
+    ROLDistributedVector::ROLDistributedVector(const dealii::IndexSet &locally_owned_elements,
+                                               const MPI_Comm communicator)
+    {
+      vector.reinit(locally_owned_elements, communicator);
+      AssertThrow(!vector.has_ghost_elements(),
+                  ExcMessage("ROLDistributedVector requires owned-only storage."));
+    }
+
+
+    ROLDistributedVector::ROLDistributedVector(const LinearAlgebra::Vector &input_vector)
+      : vector(input_vector)
+    {
+      AssertThrow(!vector.has_ghost_elements(),
+                  ExcMessage("ROLDistributedVector requires owned-only storage."));
+    }
+
+
+    void
+    ROLDistributedVector::plus(const ROL::Vector<double> &input_vector)
+    {
+      const ROLDistributedVector &other = get_vector(input_vector);
+      assert_compatible(other);
+      vector += other.vector;
+    }
+
+
+    void
+    ROLDistributedVector::scale(const double alpha)
+    {
+      vector *= alpha;
+    }
+
+
+    double
+    ROLDistributedVector::dot(const ROL::Vector<double> &input_vector) const
+    {
+      const ROLDistributedVector &other = get_vector(input_vector);
+      assert_compatible(other);
+
+      // Each global entry is owned exactly once. Sum owned products locally,
+      // then one all-reduction realizes the global Euclidean inner product;
+      // ghosted vectors are forbidden by construction to prevent duplicates.
+      double local_dot = 0.0;
+      for (const auto index : vector.locally_owned_elements())
+        local_dot += vector[index] * other.vector[index];
+
+      return dealii::Utilities::MPI::sum(local_dot, vector.get_mpi_communicator());
+    }
+
+
+    double
+    ROLDistributedVector::norm() const
+    {
+      return std::sqrt(dot(*this));
+    }
+
+
+    ROL::Ptr<ROL::Vector<double>>
+    ROLDistributedVector::clone() const
+    {
+      return ROL::makePtr<ROLDistributedVector>(vector.locally_owned_elements(),
+                                                vector.get_mpi_communicator());
+    }
+
+
+    void
+    ROLDistributedVector::axpy(const double alpha,
+                               const ROL::Vector<double> &input_vector)
+    {
+      const ROLDistributedVector &other = get_vector(input_vector);
+      assert_compatible(other);
+      vector.add(alpha, other.vector);
+    }
+
+
+    void
+    ROLDistributedVector::set(const ROL::Vector<double> &input_vector)
+    {
+      const ROLDistributedVector &other = get_vector(input_vector);
+      assert_compatible(other);
+      vector = other.vector;
+    }
+
+
+    ROL::Ptr<ROL::Vector<double>>
+    ROLDistributedVector::basis(const int index) const
+    {
+      AssertThrow(index >= 0 && static_cast<types::global_dof_index>(index) < vector.size(),
+                  ExcMessage("The requested ROL basis index is outside the vector range."));
+
+      // Only the owning rank writes e_i=1. compress(insert) completes the
+      // Trilinos write protocol without communicating a duplicated value.
+      ROL::Ptr<ROL::Vector<double>> result = clone();
+      ROLDistributedVector &distributed_result = get_vector(*result);
+      if (distributed_result.vector.locally_owned_elements().is_element(index))
+        distributed_result.vector[index] = 1.0;
+      finish_owned_write(distributed_result.vector);
+      return result;
+    }
+
+
+    int
+    ROLDistributedVector::dimension() const
+    {
+      AssertThrow(vector.size() <= static_cast<types::global_dof_index>(INT_MAX),
+                  ExcMessage("ROL::Vector::dimension() cannot represent this global vector size."));
+      return static_cast<int>(vector.size());
+    }
+
+
+    void
+    ROLDistributedVector::applyUnary(const ROL::Elementwise::UnaryFunction<double> &function)
+    {
+      for (const auto index : vector.locally_owned_elements())
+        vector[index] = function.apply(vector[index]);
+      finish_owned_write(vector);
+    }
+
+
+    void
+    ROLDistributedVector::applyBinary(const ROL::Elementwise::BinaryFunction<double> &function,
+                                      const ROL::Vector<double> &input_vector)
+    {
+      const ROLDistributedVector &other = get_vector(input_vector);
+      assert_compatible(other);
+      for (const auto index : vector.locally_owned_elements())
+        vector[index] = function.apply(vector[index], other.vector[index]);
+      finish_owned_write(vector);
+    }
+
+
+    double
+    ROLDistributedVector::reduce(const ROL::Elementwise::ReductionOp<double> &reduction) const
+    {
+      // ROL's elementwise reduction first folds each ownership partition and
+      // then requires the matching MPI monoid globally. Logical AND and
+      // bitwise OR need integral MPI datatypes rather than applying floating-
+      // point SUM semantics to ROL's encoded values.
+      double local_value = reduction.initialValue();
+      for (const auto index : vector.locally_owned_elements())
+        reduction.reduce(vector[index], local_value);
+
+      double global_value = reduction.initialValue();
+      switch (reduction.reductionType())
+        {
+          case ROL::Elementwise::REDUCE_SUM:
+            MPI_Allreduce(&local_value, &global_value, 1, MPI_DOUBLE, MPI_SUM,
+                          vector.get_mpi_communicator());
+            break;
+          case ROL::Elementwise::REDUCE_MIN:
+            MPI_Allreduce(&local_value, &global_value, 1, MPI_DOUBLE, MPI_MIN,
+                          vector.get_mpi_communicator());
+            break;
+          case ROL::Elementwise::REDUCE_MAX:
+            MPI_Allreduce(&local_value, &global_value, 1, MPI_DOUBLE, MPI_MAX,
+                          vector.get_mpi_communicator());
+            break;
+          case ROL::Elementwise::REDUCE_AND:
+          {
+            int local_flag = local_value != 0.0 ? 1 : 0;
+            int global_flag = 0;
+            MPI_Allreduce(&local_flag, &global_flag, 1, MPI_INT, MPI_LAND,
+                          vector.get_mpi_communicator());
+            global_value = static_cast<double>(global_flag);
+            break;
+          }
+          case ROL::Elementwise::REDUCE_BOR:
+          {
+            std::uint64_t local_bits = static_cast<std::uint64_t>(local_value);
+            std::uint64_t global_bits = 0;
+            MPI_Allreduce(&local_bits, &global_bits, 1, MPI_UINT64_T, MPI_BOR,
+                          vector.get_mpi_communicator());
+            global_value = static_cast<double>(global_bits);
+            break;
+          }
+        }
+      return global_value;
+    }
+
+
+    void
+    ROLDistributedVector::setScalar(const double value)
+    {
+      for (const auto index : vector.locally_owned_elements())
+        vector[index] = value;
+      finish_owned_write(vector);
+    }
+
+
+    LinearAlgebra::Vector &
+    ROLDistributedVector::get_vector()
+    {
+      return vector;
+    }
+
+
+    const LinearAlgebra::Vector &
+    ROLDistributedVector::get_vector() const
+    {
+      return vector;
+    }
+
+
+    ROLDistributedVector &
+    ROLDistributedVector::get_vector(ROL::Vector<double> &input_vector)
+    {
+      ROLDistributedVector *distributed_vector =
+        dynamic_cast<ROLDistributedVector *>(&input_vector);
+      AssertThrow(distributed_vector != nullptr,
+                  ExcMessage("ROLDistributedVector requires another ROLDistributedVector."));
+      return *distributed_vector;
+    }
+
+
+    const ROLDistributedVector &
+    ROLDistributedVector::get_vector(const ROL::Vector<double> &input_vector)
+    {
+      const ROLDistributedVector *distributed_vector =
+        dynamic_cast<const ROLDistributedVector *>(&input_vector);
+      AssertThrow(distributed_vector != nullptr,
+                  ExcMessage("ROLDistributedVector requires another ROLDistributedVector."));
+      return *distributed_vector;
+    }
+
+
+    bool
+    ROLDistributedVector::has_same_layout(const ROLDistributedVector &other) const
+    {
+      return vector.size() == other.vector.size()
+             && vector.locally_owned_elements() == other.vector.locally_owned_elements()
+             && communicators_are_compatible(vector.get_mpi_communicator(),
+                                             other.vector.get_mpi_communicator());
+    }
+
+
+    void
+    ROLDistributedVector::assert_compatible(const ROLDistributedVector &other) const
+    {
+      AssertThrow(has_same_layout(other),
+                  ExcMessage("ROLDistributedVector operands must have the same global size, "
+                             "owned IndexSet, and MPI communicator."));
+    }
+
+
+    ROLReducedL2Vector::ROLReducedL2Vector(
+      const dealii::IndexSet &locally_owned_elements,
+      const MPI_Comm communicator,
+      const std::shared_ptr<const LinearAlgebra::SparseMatrix> &mass_matrix)
+      : ROLDistributedVector(locally_owned_elements, communicator)
+      , metric_mass_matrix(mass_matrix)
+    {
+      AssertThrow(metric_mass_matrix != nullptr,
+                  ExcMessage("ROLReducedL2Vector requires a mass-metric matrix."));
+      AssertThrow(metric_mass_matrix->m() == get_vector().size()
+                  && metric_mass_matrix->n() == get_vector().size(),
+                  ExcMessage("The ROL L2 metric has an incompatible global size."));
+    }
+
+
+    ROLReducedL2Vector::ROLReducedL2Vector(
+      const LinearAlgebra::Vector &input_vector,
+      const std::shared_ptr<const LinearAlgebra::SparseMatrix> &mass_matrix)
+      : ROLDistributedVector(input_vector)
+      , metric_mass_matrix(mass_matrix)
+    {
+      AssertThrow(metric_mass_matrix != nullptr,
+                  ExcMessage("ROLReducedL2Vector requires a mass-metric matrix."));
+      AssertThrow(metric_mass_matrix->m() == get_vector().size()
+                  && metric_mass_matrix->n() == get_vector().size(),
+                  ExcMessage("The ROL L2 metric has an incompatible global size."));
+    }
+
+
+    double
+    ROLReducedL2Vector::dot(const ROL::Vector<double> &input_vector) const
+    {
+      const ROLReducedL2Vector *other = dynamic_cast<const ROLReducedL2Vector *>(&input_vector);
+      AssertThrow(other != nullptr,
+                  ExcMessage("An L2 ROL vector can only be paired with another L2 ROL vector."));
+      assert_metric_compatible(*other);
+
+      // Reduced coefficients represent FE temperature perturbations. Their
+      // physical inner product is
+      //   <x,y>_L2 = integral (P x)(P y) dx = x^T M_c y,
+      // where M_c=P^T M_T P is assembled by InitialTemperatureControl.
+      LinearAlgebra::Vector mass_times_other(other->get_vector());
+      metric_mass_matrix->vmult(mass_times_other, other->get_vector());
+      return get_vector() * mass_times_other;
+    }
+
+
+    ROL::Ptr<ROL::Vector<double>>
+    ROLReducedL2Vector::clone() const
+    {
+      return ROL::makePtr<ROLReducedL2Vector>(get_vector().locally_owned_elements(),
+                                              get_vector().get_mpi_communicator(),
+                                              metric_mass_matrix);
+    }
+
+
+    const std::shared_ptr<const LinearAlgebra::SparseMatrix> &
+    ROLReducedL2Vector::mass_matrix() const
+    {
+      return metric_mass_matrix;
+    }
+
+
+    void
+    ROLReducedL2Vector::assert_metric_compatible(const ROLReducedL2Vector &other) const
+    {
+      AssertThrow(has_same_layout(other) && metric_mass_matrix == other.metric_mass_matrix,
+                  ExcMessage("L2 ROL vector operands must share layout and mass metric."));
+    }
+
+
+    ROLDistributedBoundConstraint::ROLDistributedBoundConstraint(
+      const LinearAlgebra::Vector &lower_bound,
+      const LinearAlgebra::Vector &upper_bound,
+      const double                 scale,
+      const double                 feasibility_tolerance)
+      : scale(scale)
+      , feasibility_tolerance(feasibility_tolerance)
+      , minimum_bound_width(std::numeric_limits<double>::infinity())
+    {
+      AssertThrow(!lower_bound.has_ghost_elements() && !upper_bound.has_ghost_elements(),
+                  ExcMessage("ROLDistributedBoundConstraint requires owned-only bounds."));
+      ROLDistributedVector lower_vector(lower_bound);
+      ROLDistributedVector upper_vector(upper_bound);
+      AssertThrow(lower_vector.has_same_layout(upper_vector),
+                  ExcMessage("The lower and upper ROL bounds have incompatible layouts."));
+      AssertThrow(scale > 0.0 && feasibility_tolerance > 0.0,
+                  ExcMessage("ROL bound scale and feasibility tolerance must be positive."));
+
+      for (const auto index : lower_bound.locally_owned_elements())
+        {
+          AssertThrow(lower_bound[index] <= upper_bound[index],
+                      ExcMessage("A ROL lower bound exceeds its upper bound."));
+          minimum_bound_width = std::min(minimum_bound_width,
+                                         upper_bound[index] - lower_bound[index]);
+        }
+      // Active-set tolerances must be consistent across ranks. Use half of the
+      // narrowest global interval as a hard cap so upper and lower active
+      // neighborhoods cannot overlap.
+      minimum_bound_width = dealii::Utilities::MPI::min(
+                              minimum_bound_width,
+                              lower_bound.get_mpi_communicator());
+      minimum_bound_width *= 0.5;
+
+      this->lower_ = ROL::makePtr<ROLDistributedVector>(lower_bound);
+      this->upper_ = ROL::makePtr<ROLDistributedVector>(upper_bound);
+      this->activate();
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::project(ROL::Vector<double> &input_vector)
+    {
+      ROLDistributedVector &distributed_vector = ROLDistributedVector::get_vector(input_vector);
+      assert_compatible(distributed_vector);
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      LinearAlgebra::Vector &values = distributed_vector.get_vector();
+
+      // Orthogonal projection for box constraints is componentwise clipping.
+      // Ownership partitions are independent, so no reduction is required.
+      for (const auto index : values.locally_owned_elements())
+        values[index] = std::min(static_cast<double>(upper[index]),
+                                 std::max(static_cast<double>(lower[index]),
+                                          static_cast<double>(values[index])));
+      finish_owned_write(values);
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::projectInterior(ROL::Vector<double> &input_vector)
+    {
+      ROLDistributedVector &distributed_vector = ROLDistributedVector::get_vector(input_vector);
+      assert_compatible(distributed_vector);
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      LinearAlgebra::Vector &values = distributed_vector.get_vector();
+      const double tolerance = 100.0 * std::numeric_limits<double>::epsilon();
+
+      // Construct a strictly feasible point. The additive margin based on the
+      // narrowest interval protects zero/small bounds; the relative margin
+      // protects large signed bounds from losing separation to roundoff.
+      for (const auto index : values.locally_owned_elements())
+        {
+          const double lower_interior =
+            std::min(lower[index] + feasibility_tolerance * minimum_bound_width,
+                     lower[index] < -tolerance ? (1.0 - feasibility_tolerance) * lower[index] :
+                     lower[index] > tolerance ? (1.0 + feasibility_tolerance) * lower[index] :
+                     lower[index] + feasibility_tolerance);
+          const double upper_interior =
+            std::max(upper[index] - feasibility_tolerance * minimum_bound_width,
+                     upper[index] < -tolerance ? (1.0 + feasibility_tolerance) * upper[index] :
+                     upper[index] > tolerance ? (1.0 - feasibility_tolerance) * upper[index] :
+                     upper[index] - feasibility_tolerance);
+          values[index] = std::min(upper_interior,
+                                   std::max(lower_interior,
+                                            static_cast<double>(values[index])));
+        }
+      finish_owned_write(values);
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::pruneUpperActive(ROL::Vector<double> &input_vector,
+                                                    const ROL::Vector<double> &x,
+                                                    const double epsilon)
+    {
+      ROLDistributedVector &values = ROLDistributedVector::get_vector(input_vector);
+      const ROLDistributedVector &state = ROLDistributedVector::get_vector(x);
+      assert_compatible(values);
+      assert_compatible(state);
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      const double threshold = active_tolerance(epsilon);
+
+      // Remove components whose state lies in the epsilon-neighborhood of the
+      // upper active set. This overload ignores direction and is used when ROL
+      // requests the geometric active-set projector.
+      for (const auto index : values.get_vector().locally_owned_elements())
+        if (state.get_vector()[index] >= upper[index] - threshold)
+          values.get_vector()[index] = 0.0;
+      finish_owned_write(values.get_vector());
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::pruneUpperActive(ROL::Vector<double> &input_vector,
+                                                    const ROL::Vector<double> &gradient,
+                                                    const ROL::Vector<double> &x,
+                                                    const double x_epsilon,
+                                                    const double gradient_epsilon)
+    {
+      ROLDistributedVector &values = ROLDistributedVector::get_vector(input_vector);
+      const ROLDistributedVector &direction = ROLDistributedVector::get_vector(gradient);
+      const ROLDistributedVector &state = ROLDistributedVector::get_vector(x);
+      assert_compatible(values);
+      assert_compatible(direction);
+      assert_compatible(state);
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      const double threshold = active_tolerance(x_epsilon);
+
+      // The directional overload prunes only a component that is both near
+      // the upper bound and points outward according to ROL's gradient-sign
+      // convention. Feasible inward directions remain available.
+      for (const auto index : values.get_vector().locally_owned_elements())
+        if (state.get_vector()[index] >= upper[index] - threshold
+            && direction.get_vector()[index] < -gradient_epsilon)
+          values.get_vector()[index] = 0.0;
+      finish_owned_write(values.get_vector());
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::pruneLowerActive(ROL::Vector<double> &input_vector,
+                                                    const ROL::Vector<double> &x,
+                                                    const double epsilon)
+    {
+      ROLDistributedVector &values = ROLDistributedVector::get_vector(input_vector);
+      const ROLDistributedVector &state = ROLDistributedVector::get_vector(x);
+      assert_compatible(values);
+      assert_compatible(state);
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const double threshold = active_tolerance(epsilon);
+
+      // Lower-bound counterpart of the geometric upper active-set projector.
+      for (const auto index : values.get_vector().locally_owned_elements())
+        if (state.get_vector()[index] <= lower[index] + threshold)
+          values.get_vector()[index] = 0.0;
+      finish_owned_write(values.get_vector());
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::pruneLowerActive(ROL::Vector<double> &input_vector,
+                                                    const ROL::Vector<double> &gradient,
+                                                    const ROL::Vector<double> &x,
+                                                    const double x_epsilon,
+                                                    const double gradient_epsilon)
+    {
+      ROLDistributedVector &values = ROLDistributedVector::get_vector(input_vector);
+      const ROLDistributedVector &direction = ROLDistributedVector::get_vector(gradient);
+      const ROLDistributedVector &state = ROLDistributedVector::get_vector(x);
+      assert_compatible(values);
+      assert_compatible(direction);
+      assert_compatible(state);
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const double threshold = active_tolerance(x_epsilon);
+
+      // At a lower bound, a positive gradient component is outward under the
+      // sign convention used by the bound-constrained trust-region step.
+      for (const auto index : values.get_vector().locally_owned_elements())
+        if (state.get_vector()[index] <= lower[index] + threshold
+            && direction.get_vector()[index] > gradient_epsilon)
+          values.get_vector()[index] = 0.0;
+      finish_owned_write(values.get_vector());
+    }
+
+
+    bool
+    ROLDistributedBoundConstraint::isFeasible(const ROL::Vector<double> &input_vector)
+    {
+      const ROLDistributedVector &distributed_vector = ROLDistributedVector::get_vector(input_vector);
+      assert_compatible(distributed_vector);
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+
+      bool locally_feasible = true;
+      for (const auto index : distributed_vector.get_vector().locally_owned_elements())
+        if (distributed_vector.get_vector()[index] < lower[index]
+            || distributed_vector.get_vector()[index] > upper[index])
+          {
+            locally_feasible = false;
+            break;
+          }
+
+      // Feasibility is global: a violation on one rank invalidates the ROL
+      // iterate everywhere. MPI logical AND supplies the collective answer.
+      const int local_flag = locally_feasible ? 1 : 0;
+      int global_flag = 0;
+      MPI_Allreduce(&local_flag, &global_flag, 1, MPI_INT, MPI_LAND,
+                    distributed_vector.get_vector().get_mpi_communicator());
+      return global_flag != 0;
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::applyInverseScalingFunction(
+      ROL::Vector<double> &scaled_vector,
+      const ROL::Vector<double> &input_vector,
+      const ROL::Vector<double> &x,
+      const ROL::Vector<double> &gradient) const
+    {
+      ROLDistributedVector &scaled = ROLDistributedVector::get_vector(scaled_vector);
+      const ROLDistributedVector &values = ROLDistributedVector::get_vector(input_vector);
+      const ROLDistributedVector &state = ROLDistributedVector::get_vector(x);
+      const ROLDistributedVector &direction = ROLDistributedVector::get_vector(gradient);
+      assert_compatible(scaled);
+      assert_compatible(values);
+      assert_compatible(state);
+      assert_compatible(direction);
+      build_scaling_function(scaled, state, direction);
+      // Apply D(x,g)^-1 componentwise. build_scaling_function enforces a
+      // strictly positive cap for feasible states, so division is well-defined.
+      for (const auto index : scaled.get_vector().locally_owned_elements())
+        scaled.get_vector()[index] = values.get_vector()[index] / scaled.get_vector()[index];
+      finish_owned_write(scaled.get_vector());
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::applyScalingFunctionJacobian(
+      ROL::Vector<double> &scaled_vector,
+      const ROL::Vector<double> &input_vector,
+      const ROL::Vector<double> &x,
+      const ROL::Vector<double> &gradient) const
+    {
+      ROLDistributedVector &scaled = ROLDistributedVector::get_vector(scaled_vector);
+      const ROLDistributedVector &values = ROLDistributedVector::get_vector(input_vector);
+      const ROLDistributedVector &state = ROLDistributedVector::get_vector(x);
+      const ROLDistributedVector &direction = ROLDistributedVector::get_vector(gradient);
+      assert_compatible(scaled);
+      assert_compatible(values);
+      assert_compatible(state);
+      assert_compatible(direction);
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      build_scaling_function(scaled, state, direction);
+
+      // Differentiate the selected piece of D(x,g). If the global cap is the
+      // active minimum, D is locally constant and its Jacobian is zero;
+      // otherwise the sign identifies the selected distance-to-bound branch.
+      for (const auto index : scaled.get_vector().locally_owned_elements())
+        {
+          const double indicator = scaled.get_vector()[index] < scaling_cap(index) ? 1.0 : 0.0;
+          if (indicator == 0.0)
+            scaled.get_vector()[index] = 0.0;
+          else
+            {
+              double derivative = direction.get_vector()[index] > 0.0 ? 1.0 :
+                                  direction.get_vector()[index] < 0.0 ? -1.0 : 1.0;
+              if (direction.get_vector()[index] == 0.0
+                  && upper[index] - state.get_vector()[index]
+                  < state.get_vector()[index] - lower[index])
+                derivative = -1.0;
+              scaled.get_vector()[index] = derivative * direction.get_vector()[index]
+                                           * values.get_vector()[index];
+            }
+        }
+      finish_owned_write(scaled.get_vector());
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::assert_compatible(const ROLDistributedVector &input_vector) const
+    {
+      AssertThrow(input_vector.has_same_layout(ROLDistributedVector::get_vector(*this->lower_))
+                  && input_vector.has_same_layout(ROLDistributedVector::get_vector(*this->upper_)),
+                  ExcMessage("ROL vector and bound layouts are incompatible."));
+    }
+
+
+    double
+    ROLDistributedBoundConstraint::active_tolerance(const double epsilon) const
+    {
+      return std::min(scale * epsilon, minimum_bound_width);
+    }
+
+
+    double
+    ROLDistributedBoundConstraint::scaling_cap(const types::global_dof_index index) const
+    {
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      return std::min(0.5 * (upper[index] - lower[index]), 1.0);
+    }
+
+
+    void
+    ROLDistributedBoundConstraint::build_scaling_function(
+      ROLDistributedVector &scaling,
+      const ROLDistributedVector &state,
+      const ROLDistributedVector &gradient) const
+    {
+      const LinearAlgebra::Vector &lower = ROLDistributedVector::get_vector(*this->lower_).get_vector();
+      const LinearAlgebra::Vector &upper = ROLDistributedVector::get_vector(*this->upper_).get_vector();
+      // Coleman-Li style diagonal scaling chooses the distance to the bound
+      // toward which the descent direction points, capped for conditioning.
+      // If neither bound is threatened, use the nearest feasible distance.
+      for (const auto index : scaling.get_vector().locally_owned_elements())
+        {
+          const double gradient_value = gradient.get_vector()[index];
+          const double lower_distance = state.get_vector()[index] - lower[index];
+          const double upper_distance = upper[index] - state.get_vector()[index];
+          const double cap = scaling_cap(index);
+          if (-gradient_value > lower_distance && lower_distance <= upper_distance)
+            scaling.get_vector()[index] = std::min(std::abs(gradient_value), cap);
+          else if (gradient_value > upper_distance && upper_distance <= lower_distance)
+            scaling.get_vector()[index] = std::min(std::abs(gradient_value), cap);
+          else
+            scaling.get_vector()[index] = std::min({lower_distance, upper_distance, cap});
+        }
+      finish_owned_write(scaling.get_vector());
+    }
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/optimization/rol_vector.cc
+========================================================================================

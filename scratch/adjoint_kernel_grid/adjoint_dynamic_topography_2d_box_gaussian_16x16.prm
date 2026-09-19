@@ -1,0 +1,121 @@
+# Scratch 16x16 Cartesian dynamic-topography adjoint/FD baseline.
+#
+# This is intentionally untracked scratch input, derived from the existing
+# adjoint dynamic-topography smoke setup. The hard circular temperature anomaly
+# is replaced by a smooth Gaussian so the kernel field is easier to interpret on
+# a modest regular grid. The all-cell finite differences are driven externally
+# by run_all_cell_fd_validation.py and the cellwise perturbation plugin, matching
+# the benchmark workflow instead of the old Adjoint/Debug prm parameters.
+
+set Dimension                              = 2
+set CFL number                             = 1.0
+set End time                               = 0
+set Start time                             = 0
+set Output directory                       = output-adjoint-dynamic-topography-2d-box-gaussian-16x16
+set Adiabatic surface temperature          = 1600
+set Pressure normalization                 = surface
+set Surface pressure                       = 0
+set Use years instead of seconds           = false
+set Nonlinear solver scheme                = no Advection, adjoint Stokes
+
+subsection Discretization
+  set Composition polynomial degree           = 0
+  set Use discontinuous composition discretization = true
+end
+
+subsection Adjoint
+  set List of objectives = dynamic topography
+
+  subsection Dynamic topography
+    set Target topography model = function
+
+    subsection Function
+      set Coordinate system = cartesian
+      set Variable names = x,y
+      set Function expression = 1000 * sin(2*pi*x/1800000)
+    end
+  end
+end
+
+subsection Boundary temperature model
+  set List of model names = box
+  set Fixed temperature boundary indicators   = 2,3
+
+  subsection Box
+    set Bottom temperature  = 1600
+    set Left temperature    = 1600
+    set Right temperature   = 1600
+    set Top temperature     = 1600
+  end
+end
+
+subsection Gravity model
+  set Model name = vertical
+
+  subsection Vertical
+    set Magnitude = 10
+  end
+end
+
+subsection Geometry model
+  set Model name = box
+
+  subsection Box
+    set X extent = 1800000
+    set Y extent = 700000
+  end
+end
+
+subsection Initial temperature model
+  set Model name = function
+
+  subsection Function
+    set Variable names     = x,y
+    set Function expression = 1600 + 100 * exp(-(((x-900000)*(x-900000) + (y-560000)*(y-560000)) / (2 * 90000 * 90000)))
+  end
+end
+
+subsection Compositional fields
+  set Number of fields = 1
+end
+
+subsection Initial composition model
+  set Model name = function
+
+  subsection Function
+    set Variable names      = x,y
+    set Function expression = if(y < 600000, 0.0, 1.0)
+  end
+end
+
+subsection Material model
+  set Model name = simple
+
+  subsection Simple model
+    set Reference density             = 3300
+    set Reference specific heat       = 1250
+    set Reference temperature         = 1600
+    set Thermal conductivity          = 0
+    set Thermal expansion coefficient = 3e-4
+    set Viscosity                     = 1e21
+    set Composition viscosity prefactor = 100
+    set Thermal viscosity exponent    = 36.84136
+  end
+end
+
+subsection Mesh refinement
+  set Initial adaptive refinement        = 0
+  set Initial global refinement          = 4
+  set Refinement fraction                = 0.5
+  set Coarsening fraction                = 0.00
+  set Strategy                           = thermal energy density
+end
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = 0,1,3
+  set Zero velocity boundary indicators       = 2
+end
+
+subsection Postprocess
+  set List of postprocessors = dynamic topography, adjoint kernels, composition statistics
+end

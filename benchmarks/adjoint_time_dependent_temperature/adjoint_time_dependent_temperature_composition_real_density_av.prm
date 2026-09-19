@@ -1,0 +1,16 @@
+# Draft T+C benchmark variant for exercising composition-dependent rho*cp in
+# the temperature equation and active artificial-viscosity estimator.
+#
+# This uses a custom formulation with incompressible mass conservation so that
+# the Stokes system remains in the v1 envelope, while the temperature equation
+# uses material-model density instead of the reference density profile.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition.prm
+
+set Output directory = output-adjoint-time-dependent-temperature-composition-real-density-av
+
+subsection Formulation
+  set Formulation          = custom
+  set Mass conservation    = incompressible
+  set Temperature equation = real density
+end

@@ -1,0 +1,48 @@
+# Coupled one-material-path benchmark for C -> eta(C) -> Stokes -> T objective.
+# Density and cp derivatives are disabled so the composition gradient isolates
+# the Stokes viscosity-coefficient route.
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/plugin/libadjoint_material_model.so
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition_coupled_no_av.prm
+
+set Output directory = output-adjoint-temperature-eta-c-stokes-no-av
+
+subsection Solver parameters
+  subsection Stokes solver parameters
+    set Use direct solver for Stokes system = true
+  end
+end
+
+subsection Material model
+  set Model name = adjoint material model
+  set Material averaging = none
+
+  subsection Adjoint material model
+    set Reference density = 1
+    set Reference specific heat = 1
+    set Reference temperature = 0
+    set Thermal expansion coefficient = 0.5
+    set Specific heat temperature coefficient = 0
+    set Density differential for compositional field 1 = 0
+    set Viscosity = 0.02
+    set Viscosity temperature coefficient = 0
+    set Viscosity composition coefficient = 2
+    set Thermal conductivity = 1e-6
+  end
+end
+
+subsection Adjoint
+
+  subsection Temperature field
+    subsection Target function
+      set Variable names = x,y
+      set Function expression = 0.42 + 0.11*x + 0.07*y + 0.03*sin(pi*x)
+    end
+  end
+
+  subsection Diagnostics
+    set Run direct Stokes viscosity derivative test = true
+    set Direct Stokes viscosity derivative test epsilon = 1e-7
+  end
+end

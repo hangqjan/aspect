@@ -56,6 +56,10 @@ namespace aspect
       prm.declare_entry ("Output details", "false",
                          Patterns::Bool(),
                          "Turns on extra information for the matrix free GMG solver to be printed.");
+      prm.declare_entry ("Output cold rebuild diagnostics", "false",
+                         Patterns::Bool(),
+                         "Print per-level MatrixFree/GMG state and pressure-mass "
+                         "diagonal diagnostics while building the preconditioner.");
       prm.declare_entry ("Execute solver timings", "false",
                          Patterns::Bool(),
                          "Executes different parts of the Stokes solver repeatedly and print timing information. "
@@ -77,6 +81,7 @@ namespace aspect
     prm.enter_subsection ("Matrix Free");
     {
       print_details = prm.get_bool ("Output details");
+      print_cold_rebuild_diagnostics = prm.get_bool ("Output cold rebuild diagnostics");
       do_timings = prm.get_bool ("Execute solver timings");
     }
     prm.leave_subsection ();
@@ -1832,6 +1837,9 @@ namespace aspect
     {
       const unsigned int n_levels = this->get_triangulation().n_global_levels();
 
+      mg_level_constraint_counts_A_block.assign(n_levels, 0);
+      mg_level_constraint_counts_Schur_complement.assign(n_levels, 0);
+
       mg_matrices_Schur_complement.clear_elements();
       mg_matrices_Schur_complement.resize(0, n_levels-1);
       mg_matrices_A_block.clear_elements();
@@ -1929,6 +1937,8 @@ namespace aspect
                 level_constraints_v.merge(user_level_constraints, AffineConstraints<double>::left_object_wins);
                 level_constraints_v.close();
               }
+            mg_level_constraint_counts_A_block[level] =
+              level_constraints_v.n_constraints();
           }
           {
 #if DEAL_II_VERSION_GTE(9,7,0)
@@ -1945,6 +1955,8 @@ namespace aspect
 #endif
 
             level_constraints_p.close();
+            mg_level_constraint_counts_Schur_complement[level] =
+              level_constraints_p.n_constraints();
           }
 
           // set up MatrixFree objects for each multigrid level
@@ -1981,6 +1993,9 @@ namespace aspect
                                                            mg_constrained_dofs_Schur_complement,
                                                            level,
                                                            selected_dof_handler);
+            mg_matrices_Schur_complement[level].set_diagnostic_context(
+              "GMG-Schur-pressure-mass", level,
+              print_cold_rebuild_diagnostics);
           }
         }
     }
@@ -2004,6 +2019,33 @@ namespace aspect
 
     for (unsigned int level=0; level < this->get_triangulation().n_global_levels(); ++level)
       {
+        const IndexSet velocity_relevant =
+          DoFTools::extract_locally_relevant_level_dofs(dof_handler_v, level);
+        const IndexSet pressure_relevant =
+          DoFTools::extract_locally_relevant_level_dofs(dof_handler_p, level);
+        const auto &level_viscosity = level_cell_data[level].viscosity;
+        const double first_level_viscosity =
+          (level_viscosity.size(0) > 0 && level_viscosity.size(1) > 0
+           ? level_viscosity(0, 0)[0]
+           : std::numeric_limits<double>::quiet_NaN());
+        if (print_cold_rebuild_diagnostics)
+          this->get_pcout()
+              << "ASPECT_MF_GMG_LEVEL"
+              << " level=" << level
+              << " velocity_dofs=" << dof_handler_v.n_dofs(level)
+              << " velocity_owned=" << dof_handler_v.locally_owned_mg_dofs(level).n_elements()
+              << " velocity_relevant=" << velocity_relevant.n_elements()
+              << " velocity_constraints=" << mg_level_constraint_counts_A_block[level]
+              << " pressure_dofs=" << dof_handler_p.n_dofs(level)
+              << " pressure_owned=" << dof_handler_p.locally_owned_mg_dofs(level).n_elements()
+              << " pressure_relevant=" << pressure_relevant.n_elements()
+              << " pressure_constraints=" << mg_level_constraint_counts_Schur_complement[level]
+              << " viscosity_shape=" << level_viscosity.size(0)
+              << "x" << level_viscosity.size(1)
+              << " first_viscosity=" << first_level_viscosity
+              << " pressure_scaling=" << level_cell_data[level].pressure_scaling
+              << " build_component=Schur-pressure-mass,A-block"
+              << std::endl;
         mg_matrices_Schur_complement[level].compute_diagonal();
         mg_matrices_A_block[level].compute_diagonal();
       }

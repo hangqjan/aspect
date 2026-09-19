@@ -1,0 +1,10 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5_after_checkpoint_stop.prm
+
+set Resume computation = auto
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Lifecycle failure injection = none
+  end
+end

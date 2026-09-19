@@ -94,6 +94,15 @@
 **Documentation:** Executes different parts of the Stokes solver repeatedly and print timing information. This is for internal benchmarking purposes: It is useful if you want to see how the solver performs. Otherwise, you don&rsquo;t want to enable this, since it adds additional computational cost to get the timing information.
 ::::
 
+::::{dropdown} __Parameter:__ {ref}`Output cold rebuild diagnostics<parameters:Solver_20parameters/Matrix_20Free/Output_20cold_20rebuild_20diagnostics>`
+:name: parameters:Solver_20parameters/Matrix_20Free/Output_20cold_20rebuild_20diagnostics
+**Default value:** false
+
+**Pattern:** [Bool]
+
+**Documentation:** Print per-level MatrixFree/GMG state and pressure-mass diagonal diagnostics while building the preconditioner.
+::::
+
 ::::{dropdown} __Parameter:__ {ref}`Output details<parameters:Solver_20parameters/Matrix_20Free/Output_20details>`
 :name: parameters:Solver_20parameters/Matrix_20Free/Output_20details
 **Default value:** false

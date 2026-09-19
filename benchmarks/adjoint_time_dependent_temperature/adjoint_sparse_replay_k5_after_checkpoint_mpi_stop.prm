@@ -1,0 +1,9 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5_restart_inside_mpi_stop.prm
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+    set Lifecycle failure injection = after checkpoint commit before cleanup
+  end
+end

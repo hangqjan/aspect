@@ -1,0 +1,12 @@
+# C7(C): the checkpoint is durable, then sparse segment removal is interrupted
+# before the manifest changes. Resume repeats the frontier idempotently.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5_restart_inside_stop.prm
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+    set Trajectory cleanup failure injection = after physical segment deletion before manifest update
+    set Trajectory cleanup failure next reverse step = 13
+  end
+end

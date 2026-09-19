@@ -20,7 +20,7 @@
 
 
 #include <aspect/simulator.h>
-#include <aspect/adjoint/manager.h>
+#include <aspect/adjoint/core/manager.h>
 #include <aspect/global.h>
 #include <aspect/utilities.h>
 #include <aspect/melt.h>
@@ -215,6 +215,7 @@ namespace aspect
                                                "no Advection, adjoint Stokes|"
                                                "single Advection, no Stokes|"
                                                "single Advection, single Stokes|"
+                                               "single Advection, single Stokes, adjoint temperature|"
                                                "single Advection, iterated Stokes|"
                                                "single Advection, iterated defect correction Stokes|"
                                                "single Advection, iterated Newton Stokes|"
@@ -250,6 +251,10 @@ namespace aspect
                        "The `single Advection, single Stokes' solver scheme performs no nonlinear iterations, "
                        "and the temperature, compositional fields and Stokes equations are solved exactly "
                        "once per time step, one after the other. This is the default solver scheme.\n"
+                       "The `single Advection, single Stokes, adjoint temperature' scheme runs the ordinary "
+                       "`single Advection, single Stokes' forward transient, records accepted timesteps, "
+                       "and then executes the time-dependent temperature adjoint reverse sweep for the "
+                       "configured adjoint temperature objective.\n"
                        "The `single Advection, iterated Stokes' scheme solves the temperature and composition "
                        "equation once at the beginning of each time step and then iterates out the solution of "
                        "the Stokes equation.\n"
@@ -1625,6 +1630,8 @@ namespace aspect
         nonlinear_solver = NonlinearSolver::single_Advection_no_Stokes;
       else if (solver_scheme == "single Advection, single Stokes")
         nonlinear_solver = NonlinearSolver::single_Advection_single_Stokes;
+      else if (solver_scheme == "single Advection, single Stokes, adjoint temperature")
+        nonlinear_solver = NonlinearSolver::single_Advection_single_Stokes_adjoint_temperature;
       else if (solver_scheme == "single Advection, iterated Stokes")
         nonlinear_solver = NonlinearSolver::single_Advection_iterated_Stokes;
       else if (solver_scheme == "single Advection, iterated defect correction Stokes")

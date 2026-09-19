@@ -1,0 +1,14 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_ev_sparse_k1.prm
+
+set Output directory = output-adjoint-ev-sparse-k5
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory anchor spacing = 5
+  end
+
+  subsection Diagnostics
+    set Run sparse trajectory replay validation = true
+  end
+end

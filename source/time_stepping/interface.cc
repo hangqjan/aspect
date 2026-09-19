@@ -197,6 +197,28 @@ namespace aspect
 
     template <int dim>
     void
+    Manager<dim>::reset_runtime_state_for_new_evaluation()
+    {
+      // The built-in convection and conduction estimators and the parsed
+      // function model hold no evolving decision state: execute() derives
+      // their result entirely from restored Simulator state. Other time-step
+      // plugins may retain a cutback/retry decision and are deliberately
+      // outside O3 v1.
+      for (const std::string &plugin_name : this->plugin_names)
+        AssertThrow(plugin_name == "convection time step"
+                    || plugin_name == "conduction time step"
+                    || plugin_name == "function",
+                    ExcMessage("Reusable in-memory evaluation currently supports "
+                               "only the stateless built-in convection, conduction, and function "
+                               "time-stepping plugins."));
+      current_reaction = Reaction::advance;
+      next_time_step_size = std::numeric_limits<double>::max();
+    }
+
+
+
+    template <int dim>
+    void
     Manager<dim>::initialize_simulator (const Simulator<dim> &simulator_object)
     {
       SimulatorAccess<dim>::initialize_simulator(simulator_object);

@@ -1,0 +1,46 @@
+# Curved free-slip regression. The full 2-D annulus forces deal.II to express
+# u.n = 0 as affine relations between Cartesian velocity components.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature.prm
+
+set Output directory = output-adjoint-bc-curved-free-slip
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run C to Stokes RHS transpose test = true
+    set C to Stokes RHS transpose test epsilon = 1e-7
+  end
+end
+
+subsection Geometry model
+  set Model name = spherical shell
+
+  subsection Spherical shell
+    set Inner radius = 1
+    set Outer radius = 2
+    set Opening angle = 360
+  end
+end
+
+subsection Boundary temperature model
+  set List of model names = spherical constant
+  set Fixed temperature boundary indicators = inner, outer
+
+  subsection Spherical constant
+    set Inner temperature = 0.5
+    set Outer temperature = 0.5
+  end
+end
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = inner, outer
+end
+
+subsection Gravity model
+  set Model name = radial constant
+
+  subsection Radial constant
+    set Magnitude = 1
+  end
+end

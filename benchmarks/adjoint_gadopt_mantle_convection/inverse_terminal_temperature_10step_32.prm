@@ -1,0 +1,26 @@
+# Archived ten-transition terminal-temperature-only synthetic-twin input.
+#
+# The former data-dependent target installation and accepted-iterate output
+# hooks were intentionally removed from ASPECT core code. Consequently this
+# file remains a parameter record for the validated experiment, not a command
+# for regenerating its archived inverse results. The forward reference and its
+# normal ASPECT visualization output remain fully runnable.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/reference_forward_32.prm
+
+set Output directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/output-adjoint-gadopt-inverse-terminal-10step-32
+
+subsection Termination criteria
+  set End step = 10
+end
+
+subsection Adjoint
+  set Solve mode = optimize
+
+  subsection Optimization
+    set Maximum iterations = 12
+    set Initial trust-region radius = 1e-3
+    set L-BFGS history size = 3
+    set Use physical temperature bounds = true
+  end
+end

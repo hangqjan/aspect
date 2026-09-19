@@ -20,7 +20,7 @@
 
 
 #include <aspect/simulator.h>
-#include <aspect/adjoint/manager.h>
+#include <aspect/adjoint/core/manager.h>
 #include <aspect/global.h>
 #include <aspect/mesh_deformation/free_surface.h>
 #include <aspect/volume_of_fluid/handler.h>
@@ -1018,6 +1018,7 @@ namespace aspect
   {
     assemble_and_solve_temperature();
     assemble_and_solve_composition();
+
     assemble_and_solve_stokes();
 
     if (parameters.run_postprocessors_on_nonlinear_iterations)

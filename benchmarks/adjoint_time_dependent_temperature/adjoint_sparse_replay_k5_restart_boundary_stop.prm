@@ -1,0 +1,15 @@
+# Exact boundary: reverse step 10 consumes q_9 and must reload anchor 5.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5_restart_baseline.prm
+
+set Output directory = output-adjoint-sparse-replay-k5-restart-boundary
+
+subsection Checkpointing
+  set Steps between checkpoint = 1
+end
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = 10
+  end
+end

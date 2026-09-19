@@ -1,0 +1,28 @@
+# Serial R0 restart validation: create a 20-step trajectory, commit the
+# reverse state before step 10, then stop deliberately.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/trajectory_archive_benchmark.prm
+
+set Output directory = output-adjoint-restart-r0
+
+subsection Checkpointing
+  set Steps between checkpoint = 1
+end
+
+subsection Solver parameters
+  subsection Matrix Free
+    set Output cold rebuild diagnostics = true
+  end
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = keep
+    set Adjoint checkpoint interval = 5
+  end
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = 10
+    set Run trajectory Stokes recovery diagnostic = false
+  end
+end

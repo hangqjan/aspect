@@ -1,0 +1,25 @@
+# Phase-B sparse-anchor validation. The dense reference archive is diagnostic
+# only; reverse state requests are served by one-pass replay windows.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/trajectory_archive_benchmark.prm
+
+set Output directory = output-adjoint-sparse-replay-k5
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory anchor spacing = 5
+    set Trajectory cleanup policy = keep
+  end
+
+  subsection Diagnostics
+    set Run trajectory Stokes recovery diagnostic = false
+    set Run sparse trajectory replay validation = true
+    set Trajectory replay tolerance = 1e-11
+  end
+end
+
+subsection Solver parameters
+  subsection Stokes solver parameters
+    set Use direct solver for Stokes system = true
+  end
+end

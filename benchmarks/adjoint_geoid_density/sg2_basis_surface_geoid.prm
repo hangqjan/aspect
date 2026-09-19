@@ -1,0 +1,7 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/sg2_basis_base.prm
+set Output directory = output-adjoint-geoid-sg2-basis-surface-geoid
+subsection Adjoint
+  subsection Self-gravitating geoid
+    set Observed surface geoid cosine coefficients = -5.0957269885558976, -4.2218901582501458e-09, -5.3205328719022567e-10
+  end
+end

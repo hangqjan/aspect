@@ -1,0 +1,19 @@
+# Time-dependent counterpart of adjoint_bc_prescribed_velocity.prm. The
+# accepted forward snapshot supplies the time at which the constraint graph is
+# captured; its nonzero value is still homogenized before the reverse solve.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_bc_prescribed_velocity.prm
+
+set Output directory = output-adjoint-bc-time-dependent-velocity
+set Maximum time step = 0.01
+
+subsection Termination criteria
+  set End step = 2
+end
+
+subsection Boundary velocity model
+  subsection Function
+    set Variable names = x, y, t
+    set Function expression = 0.1*sin(2*pi*t); 0
+  end
+end

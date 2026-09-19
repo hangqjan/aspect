@@ -1,0 +1,10 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_lifecycle_direct_on_success.prm
+
+set Output directory = output-adjoint-lifecycle-direct-on-success-stop
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = 10
+  end
+end

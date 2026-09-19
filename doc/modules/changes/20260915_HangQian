@@ -1,0 +1,7 @@
+Changed: Refactored the instantaneous and time-dependent adjoint framework,
+including objective capabilities, trajectory/restart state, dynamic-topography
+and geoid operators, self-gravitation, diagnostics, and initial-temperature
+optimization. Existing discrete scientific operators and the two dedicated
+nonlinear solver schemes are preserved.
+<br>
+(Hang Qian, 2026/09/15)

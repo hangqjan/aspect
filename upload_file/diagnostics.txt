@@ -1,0 +1,3549 @@
+// Consolidated adjoint module: diagnostics
+// Each section begins with its original repository path.
+
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/diagnostics/diagnostics.h
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#ifndef _aspect_adjoint_diagnostics_diagnostics_h
+#define _aspect_adjoint_diagnostics_diagnostics_h
+
+#include <aspect/adjoint/operators/advection_adjoint_calculator.h>
+#include <aspect/adjoint/time_dependent/trajectory_store.h>
+#include <aspect/simulator_access.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim> class Manager;
+
+    namespace Diagnostics
+    {
+      /**
+       * Test-driver access to perturbing reduced-control checks.
+       *
+       * These operations restore or rerun the forward model and therefore do
+       * not belong to the public production facade. Keeping them behind this
+       * adapter makes their side effects explicit to a test driver.
+       *
+       * @ingroup Adjoint
+       */
+      template <int dim>
+      class InitialTemperatureOptimizationChecks
+      {
+        public:
+          explicit InitialTemperatureOptimizationChecks(
+            ::aspect::Adjoint::Manager<dim> &manager);
+
+          void reuse() const;
+          void single_evaluation() const;
+          void taylor() const;
+          void initialization_stage(const unsigned int stage) const;
+
+        private:
+          ::aspect::Adjoint::Manager<dim> &manager;
+      };
+
+      /**
+       * Test-driver access to perturbing and high-cost checks for the
+       * advection transpose. Keeping this adapter in Diagnostics prevents the
+       * production operator from exposing a public family of run_* methods.
+       *
+       * @ingroup Adjoint
+       */
+      template <int dim>
+      class AdvectionOperatorChecks
+      {
+        public:
+          explicit AdvectionOperatorChecks(AdvectionAdjointCalculator<dim> &calculator);
+
+          void velocity_transpose(const AdvectionField &advection_field,
+                                  const ForwardStateView<dim> &snapshot,
+                                  const LinearAlgebra::BlockVector &current_field_adjoint,
+                                  const double epsilon) const;
+
+          void transposed_constraints(const AdvectionField &advection_field,
+                                      const ForwardStateView<dim> &snapshot,
+                                      const LinearAlgebra::BlockVector &current_field_adjoint) const;
+
+          void artificial_viscosity_coefficient_seed(
+            const AdvectionField &advection_field,
+            const ForwardStateView<dim> &snapshot,
+            const LinearAlgebra::BlockVector &current_field_adjoint,
+            const double epsilon) const;
+
+          void artificial_viscosity_estimator_transpose(
+            const AdvectionField &advection_field,
+            const ForwardStateView<dim> &snapshot,
+            const double epsilon) const;
+
+          void local_entropy_residual_transpose(const AdvectionField &advection_field,
+                                                const ForwardStateView<dim> &snapshot,
+                                                const double epsilon) const;
+
+          void global_entropy_denominator_scalar(const AdvectionField &advection_field,
+                                                 const ForwardStateView<dim> &snapshot,
+                                                 const double epsilon) const;
+
+          void global_entropy_variation_transpose(const AdvectionField &advection_field,
+                                                  const ForwardStateView<dim> &snapshot,
+                                                  const double epsilon) const;
+
+        private:
+          AdvectionAdjointCalculator<dim> &calculator;
+      };
+
+      /**
+       * Central entry point for lightweight, non-perturbing adjoint runtime
+       * diagnostics. Numerical differentiation and transpose checks belong in
+       * test drivers and are intentionally not part of this interface.
+       *
+       * @ingroup Adjoint
+       */
+      template <int dim>
+      class Manager : public SimulatorAccess<dim>
+      {
+        public:
+          /** Enable or disable rank-local memory checkpoints. */
+          void
+          set_output_memory_checkpoints(const bool enabled);
+
+          /** Report durable trajectory storage and the active replay cache. */
+          void
+          report_trajectory(
+            const TrajectoryStore &trajectory,
+            const std::string &stage,
+            const std::size_t local_cache_memory,
+            const std::size_t local_current_record_memory,
+            const unsigned int stokes_recovery_solves,
+            const unsigned int sparse_peak_window_state_count,
+            const unsigned int sparse_replay_transition_count,
+            const unsigned int sparse_restart_replay_transition_count) const;
+
+          /** Emit one allocation-free, rank-local memory checkpoint. */
+          void
+          report_memory_checkpoint(
+            const std::string &stage,
+            const LinearAlgebra::BlockVector &state,
+            const std::size_t reverse_cache_size) const;
+
+        private:
+          bool output_memory_checkpoints = false;
+      };
+    }
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/diagnostics/diagnostics.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/diagnostics/advection_diagnostics.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  Perturbing finite-difference and constraint checks for the advection
+  transpose are compiled separately from the production operator.
+*/
+
+#include <aspect/adjoint/operators/advection_adjoint_calculator.h>
+#include <aspect/adjoint/operators/artificial_viscosity_adjoint.h>
+#include <aspect/adjoint/operators/boundary_conditions.h>
+#include <aspect/adjoint/core/simulator_state.h>
+#include <aspect/advection_field.h>
+#include <aspect/simulator.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <set>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_transposed_advection_constraint_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const LinearAlgebra::BlockVector &current_field_adjoint) const
+    {
+      if (snapshot.timestep_number == 0
+          || current_field_adjoint.l2_norm() <= std::numeric_limits<double>::min())
+        return;
+
+      // Diagnostics also restore the snapshot into the Simulator because the
+      // forward assembly routines cache constraint and stabilization state as
+      // a side effect. The saved state is restored at the end so the caller
+      // can continue the reverse sweep from its current checkpoint.
+      ScopedSimulatorState<dim> simulator_state(*simulator);
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      BoundaryConditions<dim> boundary_conditions;
+      boundary_conditions.build_temperature_adjoint_constraints(snapshot,
+                                                                simulator->current_constraints);
+
+      simulator->assemble_advection_system(advection_field);
+
+      LinearAlgebra::BlockVector z;
+      solve_transposed_advection_system(advection_field,
+                                        current_field_adjoint,
+                                        z);
+
+      // This scalar-field regression checks the essential constrained DoFs in
+      // the active field block. The BoundaryConditions helper separately
+      // verifies the full affine graph before it is distributed, because an
+      // affine relation must not be tested merely by forcing its slave entry
+      // to zero.
+      const unsigned int field_component =
+        advection_field.component_index(this->introspection());
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::vector<types::global_dof_index> local_dof_indices(this->get_fe().dofs_per_cell);
+      std::set<types::global_dof_index> written_dofs;
+
+      double local_max_abs_constrained_value = 0.0;
+      unsigned int local_constrained_dofs = 0;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (component != field_component
+                    || locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false
+                    || this->get_current_constraints().is_constrained(global_index) == false)
+                  continue;
+
+                local_max_abs_constrained_value =
+                  std::max(local_max_abs_constrained_value,
+                           std::abs(z(global_index)));
+                ++local_constrained_dofs;
+              }
+          }
+
+      const double max_abs_constrained_value =
+        Utilities::MPI::max(local_max_abs_constrained_value,
+                            this->get_mpi_communicator());
+      const unsigned int constrained_dofs =
+        Utilities::MPI::sum(local_constrained_dofs,
+                            this->get_mpi_communicator());
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection transposed-solve constrained DoF diagnostic: constrained DoFs = "
+                        << constrained_dofs
+                        << ", max |z| = "
+                        << std::setprecision(16) << max_abs_constrained_value
+                        << std::setprecision(6) << std::endl;
+
+      AssertThrow(max_abs_constrained_value <= 1e-14,
+                  ExcMessage("The transposed advection solve produced nonzero values "
+                             "on constrained adjoint DoFs. Homogeneous adjoint "
+                             "constraints must be distributed."));
+
+    }
+
+
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_artificial_viscosity_coefficient_seed_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const LinearAlgebra::BlockVector &current_field_adjoint,
+      const double epsilon) const
+    {
+      if (snapshot.timestep_number == 0
+          || current_field_adjoint.l2_norm() <= std::numeric_limits<double>::min()
+          || this->get_parameters().advection_stabilization_method
+          != Parameters<dim>::AdvectionStabilizationMethod::entropy_viscosity)
+        return;
+
+      // This diagnostic checks only the residual -> artificial-viscosity
+      // coefficient layer. It first solves the transposed advection block to
+      // obtain z, then asks ArtificialViscosityAdjoint for the cellwise seed
+      // dR/dnu_art^T z and compares that seed with a local finite-difference
+      // perturbation of independent cell coefficients.
+      ScopedSimulatorState<dim> simulator_state(*simulator);
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      BoundaryConditions<dim> boundary_conditions;
+      boundary_conditions.build_temperature_adjoint_constraints(snapshot,
+                                                                simulator->current_constraints);
+
+      simulator->assemble_advection_system(advection_field);
+
+      LinearAlgebra::BlockVector z;
+      solve_transposed_advection_system(advection_field,
+                                        current_field_adjoint,
+                                        z);
+
+      ArtificialViscosityAdjoint<dim> artificial_viscosity_adjoint(*simulator);
+      const std::vector<double> artificial_viscosity_seed =
+        artificial_viscosity_adjoint.assemble_coefficient_seed(advection_field,
+                                                               snapshot,
+                                                               z);
+      artificial_viscosity_adjoint.run_coefficient_seed_diagnostic(advection_field,
+                                                                   snapshot,
+                                                                   z,
+                                                                   artificial_viscosity_seed,
+                                                                   epsilon);
+
+    }
+
+
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_artificial_viscosity_estimator_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Reassemble the forward estimator at the archived time level, then
+      // delegate the full dot-product identity to the diagnostic operator.
+      // Saving Simulator fields is necessary because assembly refreshes
+      // coefficient caches as a side effect of constructing the test map.
+      if (snapshot.timestep_number == 0
+          || this->get_parameters().advection_stabilization_method
+          != Parameters<dim>::AdvectionStabilizationMethod::entropy_viscosity)
+        return;
+
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      simulator->assemble_advection_system(advection_field);
+
+      ArtificialViscosityAdjoint<dim> artificial_viscosity_adjoint(*simulator);
+      artificial_viscosity_adjoint.run_estimator_transpose_diagnostic(advection_field,
+                                                                      snapshot,
+                                                                      epsilon);
+
+      simulator->solution = saved_solution;
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+      simulator->current_linearization_point = saved_linearization_point;
+      simulator->system_rhs = saved_system_rhs;
+      simulator->time = saved_time;
+      simulator->time_step = saved_time_step;
+      simulator->old_time_step = saved_old_time_step;
+      simulator->timestep_number = saved_timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        saved_pressure_normalization_adjustment;
+    }
+
+
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_global_entropy_variation_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Wrapper for the frozen-average Delta_E transpose test. The alpha/BDF
+      // guards are part of its mathematical domain: alpha=1 has no entropy
+      // denominator and the first step has no independent old-old history.
+      if (snapshot.timestep_number <= 1
+          || this->get_parameters().advection_stabilization_method
+          != Parameters<dim>::AdvectionStabilizationMethod::entropy_viscosity
+          || this->get_parameters().stabilization_alpha != 2)
+        return;
+
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      simulator->assemble_advection_system(advection_field);
+
+      ArtificialViscosityAdjoint<dim> artificial_viscosity_adjoint(*simulator);
+      artificial_viscosity_adjoint.run_global_entropy_variation_transpose_diagnostic(advection_field,
+                                                                                     snapshot,
+                                                                                     epsilon);
+
+      simulator->solution = saved_solution;
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+      simulator->current_linearization_point = saved_linearization_point;
+      simulator->system_rhs = saved_system_rhs;
+      simulator->time = saved_time;
+      simulator->time_step = saved_time_step;
+      simulator->old_time_step = saved_old_time_step;
+      simulator->timestep_number = saved_timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        saved_pressure_normalization_adjustment;
+    }
+
+
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_global_entropy_denominator_scalar_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Wrapper for the scalar derivative of 1/Delta_E in the active
+      // entropy-viscosity branch. Restoring the snapshot before assembly makes
+      // the cached cell coefficients identical to the reverse step under test.
+      if (snapshot.timestep_number <= 1
+          || this->get_parameters().advection_stabilization_method
+          != Parameters<dim>::AdvectionStabilizationMethod::entropy_viscosity
+          || this->get_parameters().stabilization_alpha != 2)
+        return;
+
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      simulator->assemble_advection_system(advection_field);
+
+      ArtificialViscosityAdjoint<dim> artificial_viscosity_adjoint(*simulator);
+      artificial_viscosity_adjoint.run_global_entropy_denominator_scalar_diagnostic(advection_field,
+                                                                                    snapshot,
+                                                                                    epsilon);
+
+      simulator->solution = saved_solution;
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+      simulator->current_linearization_point = saved_linearization_point;
+      simulator->system_rhs = saved_system_rhs;
+      simulator->time = saved_time;
+      simulator->time_step = saved_time_step;
+      simulator->old_time_step = saved_old_time_step;
+      simulator->timestep_number = saved_timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        saved_pressure_normalization_adjustment;
+    }
+
+
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_local_entropy_residual_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Wrapper for the local numerator/max transpose. This deliberately
+      // isolates the strong-residual computation from both global entropy
+      // variation and extrapolated-range derivatives.
+      if (snapshot.timestep_number <= 1
+          || this->get_parameters().advection_stabilization_method
+          != Parameters<dim>::AdvectionStabilizationMethod::entropy_viscosity
+          || this->get_parameters().stabilization_alpha != 2)
+        return;
+
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      simulator->assemble_advection_system(advection_field);
+
+      ArtificialViscosityAdjoint<dim> artificial_viscosity_adjoint(*simulator);
+      artificial_viscosity_adjoint.run_local_entropy_residual_transpose_diagnostic(advection_field,
+                                                                                   snapshot,
+                                                                                   epsilon);
+
+      simulator->solution = saved_solution;
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+      simulator->current_linearization_point = saved_linearization_point;
+      simulator->system_rhs = saved_system_rhs;
+      simulator->time = saved_time;
+      simulator->time_step = saved_time_step;
+      simulator->old_time_step = saved_old_time_step;
+      simulator->timestep_number = saved_timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        saved_pressure_normalization_adjustment;
+    }
+
+
+    template <int dim>
+    void
+    AdvectionAdjointCalculator<dim>::run_velocity_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const LinearAlgebra::BlockVector &current_field_adjoint,
+      const double epsilon) const
+    {
+      if (snapshot.timestep_number == 0
+          || current_field_adjoint.l2_norm() <= std::numeric_limits<double>::min())
+        return;
+
+      // This one-step check compares the explicit velocity transpose against
+      // finite differences of the assembled advection residual. It is meant
+      // for BDF1/u* checks; Manager skips it for later BDF2 steps because the
+      // diagnostic does not test the split between q_{n-1} and q_{n-2}.
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      simulator->assemble_advection_system(advection_field);
+
+      LinearAlgebra::BlockVector z;
+      solve_transposed_advection_system(advection_field,
+                                        current_field_adjoint,
+                                        z);
+
+      LinearAlgebra::BlockVector velocity_adjoint;
+      velocity_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                              this->introspection().index_sets.system_relevant_partitioning,
+                              this->get_mpi_communicator());
+      velocity_adjoint = 0.0;
+      LinearAlgebra::BlockVector previous_previous_velocity_adjoint;
+      previous_previous_velocity_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                                                this->introspection().index_sets.system_relevant_partitioning,
+                                                this->get_mpi_communicator());
+      previous_previous_velocity_adjoint = 0.0;
+      add_velocity_transpose(advection_field,
+                             snapshot,
+                             z,
+                             velocity_adjoint,
+                             snapshot.timestep_number > 1 ? &previous_previous_velocity_adjoint : nullptr);
+      const unsigned int field_component =
+        advection_field.component_index(this->introspection());
+
+      LinearAlgebra::BlockVector delta_velocity;
+      delta_velocity.reinit(this->introspection().index_sets.system_partitioning,
+                            this->introspection().index_sets.system_relevant_partitioning,
+                            this->get_mpi_communicator());
+      delta_velocity = 0.0;
+
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::vector<types::global_dof_index> local_dof_indices(this->get_fe().dofs_per_cell);
+      std::set<types::global_dof_index> written_dofs;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (this->introspection().component_masks.velocities[component])
+                  delta_velocity(global_index) =
+                    std::sin(0.191 * static_cast<double>(global_index + 1));
+              }
+          }
+      delta_velocity.compress(VectorOperation::insert);
+      this->get_current_constraints().distribute(delta_velocity);
+
+      auto assemble_advection_residual_for_velocity_perturbation =
+        [&](const double sign)
+      {
+        simulator->solution = snapshot.solution.get();
+        simulator->old_solution = snapshot.old_solution.get();
+        simulator->old_old_solution = snapshot.old_old_solution.get();
+        simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+        simulator->current_linearization_point.add(sign * epsilon,
+                                                   delta_velocity);
+        simulator->time = snapshot.time;
+        simulator->time_step = snapshot.time_step;
+        simulator->old_time_step = snapshot.old_time_step;
+        simulator->timestep_number = snapshot.timestep_number;
+        simulator->last_pressure_normalization_adjustment =
+          snapshot.pressure_normalization_adjustment;
+
+        simulator->assemble_advection_system(advection_field);
+
+        LinearAlgebra::BlockVector matrix_times_solution;
+        matrix_times_solution.reinit(this->introspection().index_sets.system_partitioning,
+                                     this->get_mpi_communicator());
+        simulator->system_matrix.vmult(matrix_times_solution,
+                                       snapshot.solution.get());
+
+        LinearAlgebra::BlockVector residual(simulator->system_rhs);
+        residual.add(-1.0, matrix_times_solution);
+        return residual;
+      };
+
+      const LinearAlgebra::BlockVector residual_plus =
+        assemble_advection_residual_for_velocity_perturbation(1.0);
+      const LinearAlgebra::BlockVector residual_minus =
+        assemble_advection_residual_for_velocity_perturbation(-1.0);
+
+      double local_fd_dot = 0.0;
+      double local_adjoint_dot = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (component == field_component
+                    && this->get_current_constraints().is_constrained(global_index) == false)
+                  local_fd_dot += z(global_index)
+                                  * (residual_plus(global_index) - residual_minus(global_index))
+                                  / (2.0 * epsilon);
+
+                if (this->introspection().component_masks.velocities[component])
+                  local_adjoint_dot += delta_velocity(global_index)
+                                       * velocity_adjoint(global_index);
+              }
+          }
+
+      const double fd_dot =
+        Utilities::MPI::sum(local_fd_dot, this->get_mpi_communicator());
+      const double adjoint_dot =
+        Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection velocity transpose diagnostic: FD = "
+                        << std::setprecision(16) << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << std::setprecision(6) << std::endl;
+
+      simulator->solution = saved_solution;
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+      simulator->current_linearization_point = saved_linearization_point;
+      simulator->system_rhs = saved_system_rhs;
+      simulator->time = saved_time;
+      simulator->time_step = saved_time_step;
+      simulator->old_time_step = saved_old_time_step;
+      simulator->timestep_number = saved_timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        saved_pressure_normalization_adjustment;
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_transposed_advection_constraint_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, \
+      const LinearAlgebra::BlockVector &) const; \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_artificial_viscosity_coefficient_seed_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, \
+      const LinearAlgebra::BlockVector &, const double) const; \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_artificial_viscosity_estimator_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_global_entropy_variation_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_global_entropy_denominator_scalar_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_local_entropy_residual_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::AdvectionAdjointCalculator<dim>::run_velocity_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, \
+      const LinearAlgebra::BlockVector &, const double) const;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/diagnostics/advection_diagnostics.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/diagnostics/artificial_viscosity_diagnostics.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  Perturbing finite-difference checks for the entropy-viscosity transpose are
+  compiled separately from the production coefficient and estimator actions.
+*/
+
+#include <aspect/adjoint/operators/artificial_viscosity_adjoint.h>
+#include <aspect/adjoint/operators/material_model_adjoint.h>
+#include <aspect/advection_field.h>
+#include <aspect/simulator.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <set>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    void
+    ArtificialViscosityAdjoint<dim>::run_coefficient_seed_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const LinearAlgebra::BlockVector &transpose_solution,
+      const std::vector<double> &coefficient_seed,
+      const double epsilon) const
+    {
+      // Verify the directional-derivative identity for the cell coefficient
+      // map nu -> R(q,nu):
+      //
+      //   z^T [R(nu+eps delta_nu)-R(nu-eps delta_nu)]/(2 eps)
+      //       = delta_nu^T bar(nu),
+      //
+      // where bar(nu) is produced by assemble_coefficient_seed(). Restrict the
+      // test to cells whose physical/artificial max branch is unambiguous.
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/artificial-viscosity coefficient seed test epsilon must be positive."));
+
+      const Vector<double> &artificial_viscosity_per_cell =
+        simulator->last_advection_artificial_viscosity_per_cell;
+      const Vector<double> &minimum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_min_per_cell;
+      const Vector<double> &maximum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_max_per_cell;
+      AssertThrow(coefficient_seed.size() == artificial_viscosity_per_cell.size(),
+                  ExcMessage("The artificial-viscosity coefficient seed diagnostic needs "
+                             "a coefficient seed vector from the same advection assembly."));
+
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(advection_field.base_element(this->introspection())).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+      const FEValuesExtractors::Scalar field_extractor =
+        advection_field.scalar_extractor(this->introspection());
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_gradients |
+                              update_JxW_values);
+
+      std::vector<Tensor<1, dim>> field_gradients(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> transpose_gradients(quadrature_formula.size());
+
+      double local_fd_dot = 0.0;
+      double local_adjoint_dot = 0.0;
+      unsigned int local_tested_cells = 0;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int active_cell_index = cell->active_cell_index();
+            const double artificial_viscosity =
+              artificial_viscosity_per_cell[active_cell_index];
+
+            if (artificial_viscosity <= minimum_physical_diffusion_per_cell[active_cell_index])
+              continue;
+
+            AssertThrow(artificial_viscosity > maximum_physical_diffusion_per_cell[active_cell_index],
+                        ExcMessage("The artificial-viscosity coefficient seed diagnostic currently "
+                                   "supports only cells where max(k, nu_art) selects the artificial "
+                                   "diffusion branch at every quadrature point."));
+
+            const double delta_nu =
+              std::sin(0.217 * static_cast<double>(active_cell_index + 1));
+            if (delta_nu == 0.0)
+              continue;
+
+            fe_values.reinit(cell);
+            fe_values[field_extractor]
+            .get_function_gradients(this->get_solution(),
+                                    field_gradients);
+            fe_values[field_extractor]
+            .get_function_gradients(transpose_solution,
+                                    transpose_gradients);
+
+            // Contract the perturbed coefficient with the same local kernel
+            // used by assemble_coefficient_seed(). This isolates coefficient
+            // differentiation from the nonsmooth entropy estimator itself.
+            double plus_functional = 0.0;
+            double minus_functional = 0.0;
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double local_kernel =
+                  -snapshot.time_step
+                  * (transpose_gradients[q] * field_gradients[q])
+                  * fe_values.JxW(q);
+                plus_functional +=
+                  (artificial_viscosity + epsilon * delta_nu) * local_kernel;
+                minus_functional +=
+                  (artificial_viscosity - epsilon * delta_nu) * local_kernel;
+              }
+
+            local_fd_dot +=
+              (plus_functional - minus_functional) / (2.0 * epsilon);
+            local_adjoint_dot +=
+              delta_nu * coefficient_seed[active_cell_index];
+            ++local_tested_cells;
+          }
+
+      // Both contractions sum disjoint locally owned cells. Reduce them before
+      // forming the relative error so every rank checks one global identity.
+      const double fd_dot =
+        Utilities::MPI::sum(local_fd_dot, this->get_mpi_communicator());
+      const double adjoint_dot =
+        Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+      const unsigned int tested_cells =
+        Utilities::MPI::sum(local_tested_cells, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection artificial-viscosity coefficient seed diagnostic: tested cells = "
+                        << tested_cells
+                        << ", FD = "
+                        << std::setprecision(16) << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << std::setprecision(6) << std::endl;
+    }
+
+
+    template <int dim>
+    void
+    ArtificialViscosityAdjoint<dim>::run_global_entropy_variation_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Isolate Delta_E(q_{n-1},q_{n-2}) while freezing q_avg. The test checks
+      //
+      //   D Delta_E[delta q_old,delta q_old_old]
+      //     = <bar(q_old),delta q_old>
+      //       + <bar(q_old_old),delta q_old_old>.
+      //
+      // Freezing q_avg deliberately excludes the separate extrapolated-range
+      // transpose so a failure identifies this one nonlocal max/mean path.
+      if (this->get_parameters().stabilization_alpha != 2
+          || snapshot.timestep_number <= 1)
+        return;
+
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/global entropy variation transpose test epsilon must be positive."));
+
+      const Quadrature<dim> &quadrature_formula =
+        advection_field.is_temperature()
+        ? this->introspection().quadratures.temperature
+        : this->introspection().quadratures.compositional_fields[advection_field.compositional_variable];
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      const FEValuesExtractors::Scalar field_extractor =
+        advection_field.scalar_extractor(this->introspection());
+
+      const std::pair<double, double> global_field_range =
+        simulator->get_extrapolated_advection_field_range(advection_field);
+      const double average_field =
+        0.5 * (global_field_range.first + global_field_range.second);
+      const double base_entropy_variation =
+        simulator->get_entropy_variation(average_field, advection_field);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_JxW_values);
+
+      std::vector<double> old_field_values(quadrature_formula.size());
+      std::vector<double> old_old_field_values(quadrature_formula.size());
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+      double local_min_entropy = std::numeric_limits<double>::max();
+      double local_max_entropy = std::numeric_limits<double>::lowest();
+      double local_entropy_integrated = 0.0;
+      double local_area = 0.0;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                           old_field_values);
+            fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                           old_old_field_values);
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double field_history =
+                  0.5 * (old_field_values[q] + old_old_field_values[q]);
+                const double entropy =
+                  (field_history - average_field) * (field_history - average_field);
+                local_min_entropy = std::min(local_min_entropy, entropy);
+                local_max_entropy = std::max(local_max_entropy, entropy);
+                local_entropy_integrated += entropy * fe_values.JxW(q);
+                local_area += fe_values.JxW(q);
+              }
+          }
+
+      const double global_min_entropy =
+        -Utilities::MPI::max(-local_min_entropy, this->get_mpi_communicator());
+      const double global_max_entropy =
+        Utilities::MPI::max(local_max_entropy, this->get_mpi_communicator());
+      const double global_entropy_integrated =
+        Utilities::MPI::sum(local_entropy_integrated, this->get_mpi_communicator());
+      const double global_area =
+        Utilities::MPI::sum(local_area, this->get_mpi_communicator());
+      const double average_entropy =
+        global_entropy_integrated / global_area;
+
+      const bool upper_branch =
+        (global_max_entropy - average_entropy)
+        >= (average_entropy - global_min_entropy);
+      // Seed Delta_E by one and reverse the selected outer max. The following
+      // FE loop then reverses E=(q_mid-q_avg)^2 and the midpoint map; q_avg is
+      // intentionally frozen in this isolated diagnostic.
+      const double bar_entropy_variation = 1.0;
+      const double bar_max_entropy = upper_branch ? bar_entropy_variation : 0.0;
+      const double bar_min_entropy = upper_branch ? 0.0 : -bar_entropy_variation;
+      const double bar_average_entropy = upper_branch
+                                         ? -bar_entropy_variation
+                                         : bar_entropy_variation;
+
+      LinearAlgebra::BlockVector old_field_adjoint;
+      old_field_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                               this->introspection().index_sets.system_relevant_partitioning,
+                               this->get_mpi_communicator());
+      old_field_adjoint = 0.0;
+      LinearAlgebra::BlockVector old_old_field_adjoint;
+      old_old_field_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                                   this->introspection().index_sets.system_relevant_partitioning,
+                                   this->get_mpi_communicator());
+      old_old_field_adjoint = 0.0;
+
+      Vector<double> local_old(dofs_per_cell);
+      Vector<double> local_old_old(dofs_per_cell);
+      unsigned int local_active_max_locations = 0;
+      unsigned int local_active_min_locations = 0;
+      const double extremum_tolerance =
+        1e-12 * std::max({1.0,
+                          std::abs(global_min_entropy),
+                          std::abs(global_max_entropy)
+                         });
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            cell->get_dof_indices(local_dof_indices);
+            fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                           old_field_values);
+            fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                           old_old_field_values);
+            local_old = 0.0;
+            local_old_old = 0.0;
+
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double field_history =
+                  0.5 * (old_field_values[q] + old_old_field_values[q]);
+                const double entropy =
+                  (field_history - average_field) * (field_history - average_field);
+
+                double bar_entropy =
+                  bar_average_entropy * fe_values.JxW(q) / global_area;
+                if (upper_branch
+                    && std::abs(entropy - global_max_entropy) <= extremum_tolerance)
+                  {
+                    bar_entropy += bar_max_entropy;
+                    ++local_active_max_locations;
+                  }
+                if (!upper_branch
+                    && std::abs(entropy - global_min_entropy) <= extremum_tolerance)
+                  {
+                    bar_entropy += bar_min_entropy;
+                    ++local_active_min_locations;
+                  }
+
+                const double bar_field_history =
+                  2.0 * (field_history - average_field) * bar_entropy;
+
+                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                  if (this->get_fe().system_to_component_index(i).first
+                      == advection_field.component_index(this->introspection()))
+                    {
+                      const double contribution =
+                        0.5 * bar_field_history
+                        * fe_values[field_extractor].value(i, q);
+                      local_old(i) += contribution;
+                      local_old_old(i) += contribution;
+                    }
+              }
+
+            this->get_current_constraints().distribute_local_to_global(local_old,
+                                                                       local_dof_indices,
+                                                                       old_field_adjoint);
+            this->get_current_constraints().distribute_local_to_global(local_old_old,
+                                                                       local_dof_indices,
+                                                                       old_old_field_adjoint);
+          }
+
+      old_field_adjoint.compress(VectorOperation::add);
+      old_old_field_adjoint.compress(VectorOperation::add);
+
+      LinearAlgebra::BlockVector delta_old;
+      delta_old.reinit(this->introspection().index_sets.system_partitioning,
+                       this->introspection().index_sets.system_relevant_partitioning,
+                       this->get_mpi_communicator());
+      delta_old = 0.0;
+      LinearAlgebra::BlockVector delta_old_old;
+      delta_old_old.reinit(this->introspection().index_sets.system_partitioning,
+                           this->introspection().index_sets.system_relevant_partitioning,
+                           this->get_mpi_communicator());
+      delta_old_old = 0.0;
+
+      const unsigned int field_component =
+        advection_field.component_index(this->introspection());
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::set<types::global_dof_index> written_dofs;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+              {
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false
+                    || this->get_fe().system_to_component_index(i).first != field_component)
+                  continue;
+
+                delta_old(global_index) =
+                  std::sin(0.223 * static_cast<double>(global_index + 1));
+                delta_old_old(global_index) =
+                  std::cos(0.181 * static_cast<double>(global_index + 1));
+              }
+          }
+      delta_old.compress(VectorOperation::insert);
+      delta_old_old.compress(VectorOperation::insert);
+      this->get_current_constraints().distribute(delta_old);
+      this->get_current_constraints().distribute(delta_old_old);
+
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+
+      auto compute_entropy_variation_with_frozen_average =
+        [&](const double sign)
+      {
+        // Perturb both history vectors along admissible FE directions while
+        // passing the unperturbed q_avg to the production forward helper.
+        simulator->old_solution = snapshot.old_solution.get();
+        simulator->old_old_solution = snapshot.old_old_solution.get();
+        simulator->old_solution.add(sign * epsilon, delta_old);
+        simulator->old_old_solution.add(sign * epsilon, delta_old_old);
+        this->get_current_constraints().distribute(simulator->old_solution);
+        this->get_current_constraints().distribute(simulator->old_old_solution);
+
+        return simulator->get_entropy_variation(average_field, advection_field);
+      };
+
+      const double entropy_variation_plus =
+        compute_entropy_variation_with_frozen_average(1.0);
+      const double entropy_variation_minus =
+        compute_entropy_variation_with_frozen_average(-1.0);
+
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+
+      double local_adjoint_dot = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+              {
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false
+                    || this->get_fe().system_to_component_index(i).first != field_component)
+                  continue;
+
+                local_adjoint_dot +=
+                  delta_old(global_index) * old_field_adjoint(global_index)
+                  + delta_old_old(global_index) * old_old_field_adjoint(global_index);
+              }
+          }
+
+      const double fd_dot =
+        (entropy_variation_plus - entropy_variation_minus) / (2.0 * epsilon);
+      const double adjoint_dot =
+        Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+      const unsigned int active_max_locations =
+        Utilities::MPI::sum(local_active_max_locations, this->get_mpi_communicator());
+      const unsigned int active_min_locations =
+        Utilities::MPI::sum(local_active_min_locations, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection global entropy variation transpose diagnostic: "
+                        << "base = "
+                        << std::setprecision(16) << base_entropy_variation
+                        << ", branch = " << (upper_branch ? "max-average" : "average-min")
+                        << ", active max/min locations = "
+                        << active_max_locations << "/" << active_min_locations
+                        << ", FD = " << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << std::setprecision(6) << std::endl;
+    }
+
+
+    template <int dim>
+    void
+    ArtificialViscosityAdjoint<dim>::run_global_entropy_denominator_scalar_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Treat the global entropy variation Delta_E as an independent scalar in
+      // nu_E=c_R h^2 M/Delta_E. Central differences must match the analytic
+      // denominator derivative -bar(nu_E) nu_E/Delta_E. This test freezes all
+      // local residuals and active min branches.
+      if (this->get_parameters().stabilization_alpha != 2
+          || snapshot.timestep_number <= 1)
+        return;
+
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/global entropy denominator scalar test epsilon must be positive."));
+
+      const Vector<double> &artificial_viscosity_per_cell =
+        simulator->last_advection_artificial_viscosity_per_cell;
+      const Vector<double> &minimum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_min_per_cell;
+      const Vector<double> &maximum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_max_per_cell;
+
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(advection_field.base_element(this->introspection())).degree
+        + (this->get_parameters().stokes_velocity_degree + 1) / 2;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+      const FEValuesExtractors::Scalar field_extractor =
+        advection_field.scalar_extractor(this->introspection());
+
+      const std::pair<double, double> global_field_range =
+        simulator->get_extrapolated_advection_field_range(advection_field);
+      const double average_field =
+        0.5 * (global_field_range.first + global_field_range.second);
+      const double global_entropy_variation =
+        simulator->get_entropy_variation(average_field, advection_field);
+      if (std::abs(global_entropy_variation) < 1e-50)
+        return;
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_gradients |
+                              update_hessians |
+                              update_quadrature_points);
+
+      std::vector<double> old_field_values(quadrature_formula.size());
+      std::vector<double> old_old_field_values(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_field_gradients(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_old_field_gradients(quadrature_formula.size());
+      std::vector<double> old_field_laplacians(quadrature_formula.size());
+      std::vector<double> old_old_field_laplacians(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_velocity_values(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_old_velocity_values(quadrature_formula.size());
+      std::vector<SymmetricTensor<2, dim>> old_strain_rates(quadrature_formula.size());
+      std::vector<SymmetricTensor<2, dim>> old_old_strain_rates(quadrature_formula.size());
+
+      // The same global denominator is consumed by every active cell. Its
+      // transpose seed is consequently the sum of all cell contributions,
+      // while plus/minus dots vary only this scalar input.
+      double local_bar_entropy_variation = 0.0;
+      double local_plus_dot = 0.0;
+      double local_minus_dot = 0.0;
+      unsigned int local_tested_cells = 0;
+      const double delta_entropy_variation = 0.371;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int active_cell_index = cell->active_cell_index();
+            const double artificial_viscosity =
+              artificial_viscosity_per_cell[active_cell_index];
+            if (artificial_viscosity <= minimum_physical_diffusion_per_cell[active_cell_index])
+              continue;
+
+            AssertThrow(artificial_viscosity > maximum_physical_diffusion_per_cell[active_cell_index],
+                        ExcMessage("The global entropy denominator scalar diagnostic currently "
+                                   "supports only cells where max(k, nu_art) selects the artificial branch."));
+
+            fe_values.reinit(cell);
+            fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                           old_field_values);
+            fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                           old_old_field_values);
+            fe_values[field_extractor].get_function_gradients(simulator->old_solution,
+                                                              old_field_gradients);
+            fe_values[field_extractor].get_function_gradients(simulator->old_old_solution,
+                                                              old_old_field_gradients);
+            fe_values[field_extractor].get_function_laplacians(simulator->old_solution,
+                                                               old_field_laplacians);
+            fe_values[field_extractor].get_function_laplacians(simulator->old_old_solution,
+                                                               old_old_field_laplacians);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_values(simulator->old_solution,
+                                 old_velocity_values);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_values(simulator->old_old_solution,
+                                 old_old_velocity_values);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_symmetric_gradients(simulator->old_solution,
+                                              old_strain_rates);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_symmetric_gradients(simulator->old_old_solution,
+                                              old_old_strain_rates);
+
+            double max_residual_measure = 0.0;
+            double max_velocity = 0.0;
+            const double h = cell->diameter();
+            const double gamma = this->get_parameters().stabilization_gamma;
+
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double field_dt =
+                  (old_field_values[q] - old_old_field_values[q])
+                  / snapshot.old_time_step;
+                const Tensor<1, dim> velocity =
+                  0.5 * (old_velocity_values[q] + old_old_velocity_values[q]);
+                const Tensor<1, dim> field_gradient =
+                  0.5 * (old_field_gradients[q] + old_old_field_gradients[q]);
+                const double laplacian =
+                  0.5 * (old_field_laplacians[q] + old_old_field_laplacians[q]);
+                const double residual =
+                  field_dt + velocity * field_gradient
+                  - maximum_physical_diffusion_per_cell[active_cell_index] * laplacian;
+                const double history_field =
+                  0.5 * (old_field_values[q] + old_old_field_values[q]);
+                max_residual_measure =
+                  std::max(max_residual_measure,
+                           std::abs(residual) * std::abs(history_field - average_field));
+
+                const SymmetricTensor<2, dim> strain_rate =
+                  0.5 * (old_strain_rates[q] + old_old_strain_rates[q]);
+                max_velocity =
+                  std::max(max_velocity,
+                           velocity.norm() + gamma * h * strain_rate.norm());
+              }
+
+            const double beta =
+              this->get_parameters().stabilization_beta[advection_field.field_index()];
+            const double c_R =
+              this->get_parameters().stabilization_c_R[advection_field.field_index()];
+            const double maximum_viscosity = beta * max_velocity * h;
+            const double entropy_viscosity =
+              c_R * h * h * max_residual_measure / global_entropy_variation;
+            if (maximum_viscosity < entropy_viscosity)
+              continue;
+
+            const double bar_nu =
+              std::cos(0.311 * static_cast<double>(active_cell_index + 1));
+            local_bar_entropy_variation +=
+              -bar_nu * entropy_viscosity / global_entropy_variation;
+
+            local_plus_dot +=
+              bar_nu * c_R * h * h * max_residual_measure
+              / (global_entropy_variation + epsilon * delta_entropy_variation);
+            local_minus_dot +=
+              bar_nu * c_R * h * h * max_residual_measure
+              / (global_entropy_variation - epsilon * delta_entropy_variation);
+            ++local_tested_cells;
+          }
+
+      const double bar_entropy_variation =
+        Utilities::MPI::sum(local_bar_entropy_variation,
+                            this->get_mpi_communicator());
+      const double fd_dot =
+        Utilities::MPI::sum((local_plus_dot - local_minus_dot) / (2.0 * epsilon),
+                            this->get_mpi_communicator());
+      const double adjoint_dot = bar_entropy_variation * delta_entropy_variation;
+      const unsigned int tested_cells =
+        Utilities::MPI::sum(local_tested_cells, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection global entropy denominator scalar diagnostic: tested cells = "
+                        << tested_cells
+                        << ", global_entropy_variation = "
+                        << std::setprecision(16) << global_entropy_variation
+                        << ", bar_global_entropy_variation = "
+                        << bar_entropy_variation
+                        << ", FD = " << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << std::setprecision(6) << std::endl;
+    }
+
+
+    template <int dim>
+    void
+    ArtificialViscosityAdjoint<dim>::run_local_entropy_residual_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Test the numerator M=max_q |R_q| |q_mid-q_avg| with the global
+      // denominator frozen. Perturb old/old-old field and velocity states and
+      // compare the central directional derivative of the selected local-max
+      // branch with the FE adjoint contractions. A second scalar comparison
+      // isolates the derivative with respect to q_avg.
+      if (this->get_parameters().stabilization_alpha != 2
+          || snapshot.timestep_number <= 1)
+        return;
+
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/local entropy residual transpose test epsilon must be positive."));
+
+      const Vector<double> &artificial_viscosity_per_cell =
+        simulator->last_advection_artificial_viscosity_per_cell;
+      const Vector<double> &minimum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_min_per_cell;
+      const Vector<double> &maximum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_max_per_cell;
+
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(advection_field.base_element(this->introspection())).degree
+        + (this->get_parameters().stokes_velocity_degree + 1) / 2;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      const FEValuesExtractors::Scalar field_extractor =
+        advection_field.scalar_extractor(this->introspection());
+
+      const std::pair<double, double> global_field_range =
+        simulator->get_extrapolated_advection_field_range(advection_field);
+      const double average_field =
+        0.5 * (global_field_range.first + global_field_range.second);
+      const double global_entropy_variation =
+        simulator->get_entropy_variation(average_field, advection_field);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_gradients |
+                              update_hessians |
+                              update_quadrature_points);
+
+      std::vector<double> old_field_values(quadrature_formula.size());
+      std::vector<double> old_old_field_values(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_field_gradients(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_old_field_gradients(quadrature_formula.size());
+      std::vector<double> old_field_laplacians(quadrature_formula.size());
+      std::vector<double> old_old_field_laplacians(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_velocity_values(quadrature_formula.size());
+      std::vector<Tensor<1, dim>> old_old_velocity_values(quadrature_formula.size());
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+      // Seed only supported active entropy-viscosity cells. The production
+      // transpose independently reconstructs the local numerator branch from
+      // these coefficients and the archived history states.
+      std::vector<double> coefficient_seed(artificial_viscosity_per_cell.size(), 0.0);
+      unsigned int local_tested_cells = 0;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int active_cell_index = cell->active_cell_index();
+            const double artificial_viscosity =
+              artificial_viscosity_per_cell[active_cell_index];
+            if (artificial_viscosity <= minimum_physical_diffusion_per_cell[active_cell_index])
+              continue;
+
+            AssertThrow(artificial_viscosity > maximum_physical_diffusion_per_cell[active_cell_index],
+                        ExcMessage("The local entropy residual diagnostic currently supports only "
+                                   "cells where max(k, nu_art) selects the artificial branch."));
+
+            fe_values.reinit(cell);
+            fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                           old_field_values);
+            fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                           old_old_field_values);
+            fe_values[field_extractor].get_function_gradients(simulator->old_solution,
+                                                              old_field_gradients);
+            fe_values[field_extractor].get_function_gradients(simulator->old_old_solution,
+                                                              old_old_field_gradients);
+            fe_values[field_extractor].get_function_laplacians(simulator->old_solution,
+                                                               old_field_laplacians);
+            fe_values[field_extractor].get_function_laplacians(simulator->old_old_solution,
+                                                               old_old_field_laplacians);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_values(simulator->old_solution,
+                                 old_velocity_values);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_values(simulator->old_old_solution,
+                                 old_old_velocity_values);
+
+            double max_residual_measure = 0.0;
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double field_dt =
+                  (old_field_values[q] - old_old_field_values[q])
+                  / snapshot.old_time_step;
+                const Tensor<1, dim> velocity =
+                  0.5 * (old_velocity_values[q] + old_old_velocity_values[q]);
+                const Tensor<1, dim> field_gradient =
+                  0.5 * (old_field_gradients[q] + old_old_field_gradients[q]);
+                const double laplacian =
+                  0.5 * (old_field_laplacians[q] + old_old_field_laplacians[q]);
+                const double residual =
+                  field_dt + velocity * field_gradient
+                  - maximum_physical_diffusion_per_cell[active_cell_index] * laplacian;
+                const double history_field =
+                  0.5 * (old_field_values[q] + old_old_field_values[q]);
+                max_residual_measure =
+                  std::max(max_residual_measure,
+                           std::abs(residual) * std::abs(history_field - average_field));
+              }
+
+            const double beta =
+              this->get_parameters().stabilization_beta[advection_field.field_index()];
+            const double c_R =
+              this->get_parameters().stabilization_c_R[advection_field.field_index()];
+            const double h = cell->diameter();
+            const double gamma = this->get_parameters().stabilization_gamma;
+            double max_velocity = 0.0;
+            std::vector<SymmetricTensor<2, dim>> old_strain_rates(quadrature_formula.size());
+            std::vector<SymmetricTensor<2, dim>> old_old_strain_rates(quadrature_formula.size());
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_symmetric_gradients(simulator->old_solution,
+                                              old_strain_rates);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_symmetric_gradients(simulator->old_old_solution,
+                                              old_old_strain_rates);
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              max_velocity =
+                std::max(max_velocity,
+                         (0.5 * (old_velocity_values[q] + old_old_velocity_values[q])).norm()
+                         + gamma * h
+                         * (0.5 * (old_strain_rates[q] + old_old_strain_rates[q])).norm());
+
+            const double maximum_viscosity = beta * max_velocity * h;
+            const double entropy_viscosity =
+              c_R * h * h * max_residual_measure / global_entropy_variation;
+            if (maximum_viscosity < entropy_viscosity)
+              continue;
+
+            const double bar_rmax =
+              std::cos(0.271 * static_cast<double>(active_cell_index + 1));
+            coefficient_seed[active_cell_index] =
+              bar_rmax * global_entropy_variation / (c_R * h * h);
+            ++local_tested_cells;
+          }
+
+      LinearAlgebra::BlockVector previous_field_adjoint;
+      previous_field_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                                    this->introspection().index_sets.system_relevant_partitioning,
+                                    this->get_mpi_communicator());
+      previous_field_adjoint = 0.0;
+      LinearAlgebra::BlockVector previous_previous_field_adjoint;
+      previous_previous_field_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                                             this->introspection().index_sets.system_relevant_partitioning,
+                                             this->get_mpi_communicator());
+      previous_previous_field_adjoint = 0.0;
+      LinearAlgebra::BlockVector previous_stokes_adjoint_rhs;
+      previous_stokes_adjoint_rhs.reinit(this->introspection().index_sets.system_partitioning,
+                                         this->introspection().index_sets.system_relevant_partitioning,
+                                         this->get_mpi_communicator());
+      previous_stokes_adjoint_rhs = 0.0;
+      LinearAlgebra::BlockVector previous_previous_stokes_adjoint_rhs;
+      previous_previous_stokes_adjoint_rhs.reinit(this->introspection().index_sets.system_partitioning,
+                                                  this->introspection().index_sets.system_relevant_partitioning,
+                                                  this->get_mpi_communicator());
+      previous_previous_stokes_adjoint_rhs = 0.0;
+
+      add_estimator_transpose(advection_field,
+                              snapshot,
+                              coefficient_seed,
+                              previous_field_adjoint,
+                              &previous_previous_field_adjoint,
+                              previous_stokes_adjoint_rhs,
+                              &previous_previous_stokes_adjoint_rhs);
+
+      LinearAlgebra::BlockVector delta_old;
+      delta_old.reinit(this->introspection().index_sets.system_partitioning,
+                       this->introspection().index_sets.system_relevant_partitioning,
+                       this->get_mpi_communicator());
+      delta_old = 0.0;
+      LinearAlgebra::BlockVector delta_old_old;
+      delta_old_old.reinit(this->introspection().index_sets.system_partitioning,
+                           this->introspection().index_sets.system_relevant_partitioning,
+                           this->get_mpi_communicator());
+      delta_old_old = 0.0;
+
+      const unsigned int field_component =
+        advection_field.component_index(this->introspection());
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::set<types::global_dof_index> written_dofs;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+              {
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false
+                    || this->get_fe().system_to_component_index(i).first != field_component)
+                  continue;
+
+                delta_old(global_index) =
+                  std::sin(0.193 * static_cast<double>(global_index + 1));
+                delta_old_old(global_index) =
+                  std::cos(0.157 * static_cast<double>(global_index + 1));
+              }
+          }
+      delta_old.compress(VectorOperation::insert);
+      delta_old_old.compress(VectorOperation::insert);
+      this->get_current_constraints().distribute(delta_old);
+      this->get_current_constraints().distribute(delta_old_old);
+
+      auto local_rmax_dot =
+        [&](const double sign)
+      {
+        simulator->old_solution = snapshot.old_solution.get();
+        simulator->old_old_solution = snapshot.old_old_solution.get();
+        simulator->old_solution.add(sign * epsilon, delta_old);
+        simulator->old_old_solution.add(sign * epsilon, delta_old_old);
+        this->get_current_constraints().distribute(simulator->old_solution);
+        this->get_current_constraints().distribute(simulator->old_old_solution);
+
+        double local_dot = 0.0;
+        for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+          if (cell->is_locally_owned())
+            {
+              const unsigned int active_cell_index = cell->active_cell_index();
+              if (coefficient_seed[active_cell_index] == 0.0)
+                continue;
+
+              fe_values.reinit(cell);
+              fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                             old_field_values);
+              fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                             old_old_field_values);
+              fe_values[field_extractor].get_function_gradients(simulator->old_solution,
+                                                                old_field_gradients);
+              fe_values[field_extractor].get_function_gradients(simulator->old_old_solution,
+                                                                old_old_field_gradients);
+              fe_values[field_extractor].get_function_laplacians(simulator->old_solution,
+                                                                 old_field_laplacians);
+              fe_values[field_extractor].get_function_laplacians(simulator->old_old_solution,
+                                                                 old_old_field_laplacians);
+              fe_values[this->introspection().extractors.velocities]
+              .get_function_values(simulator->old_solution,
+                                   old_velocity_values);
+              fe_values[this->introspection().extractors.velocities]
+              .get_function_values(simulator->old_old_solution,
+                                   old_old_velocity_values);
+
+              double max_residual_measure = 0.0;
+              for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+                {
+                  const double field_dt =
+                    (old_field_values[q] - old_old_field_values[q])
+                    / snapshot.old_time_step;
+                  const Tensor<1, dim> velocity =
+                    0.5 * (old_velocity_values[q] + old_old_velocity_values[q]);
+                  const Tensor<1, dim> field_gradient =
+                    0.5 * (old_field_gradients[q] + old_old_field_gradients[q]);
+                  const double laplacian =
+                    0.5 * (old_field_laplacians[q] + old_old_field_laplacians[q]);
+                  const double residual =
+                    field_dt + velocity * field_gradient
+                    - maximum_physical_diffusion_per_cell[active_cell_index] * laplacian;
+                  const double history_field =
+                    0.5 * (old_field_values[q] + old_old_field_values[q]);
+                  max_residual_measure =
+                    std::max(max_residual_measure,
+                             std::abs(residual) * std::abs(history_field - average_field));
+                }
+
+              const double c_R =
+                this->get_parameters().stabilization_c_R[advection_field.field_index()];
+              const double h = cell->diameter();
+              const double bar_rmax =
+                coefficient_seed[active_cell_index]
+                * c_R * h * h / global_entropy_variation;
+              local_dot += bar_rmax * max_residual_measure;
+            }
+        return local_dot;
+      };
+
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const double plus_dot = local_rmax_dot(1.0);
+      const double minus_dot = local_rmax_dot(-1.0);
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+
+      // Recompute the selected numerator maximum under a scalar perturbation
+      // of q_avg. This isolates the entropy-weight derivative from all field
+      // and velocity directions used in the main local-residual check.
+      auto local_rmax_dot_with_average =
+        [&](const double perturbed_average_field)
+      {
+        double local_dot = 0.0;
+        for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+          if (cell->is_locally_owned())
+            {
+              const unsigned int active_cell_index = cell->active_cell_index();
+              if (coefficient_seed[active_cell_index] == 0.0)
+                continue;
+
+              fe_values.reinit(cell);
+              fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                             old_field_values);
+              fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                             old_old_field_values);
+              fe_values[field_extractor].get_function_gradients(simulator->old_solution,
+                                                                old_field_gradients);
+              fe_values[field_extractor].get_function_gradients(simulator->old_old_solution,
+                                                                old_old_field_gradients);
+              fe_values[field_extractor].get_function_laplacians(simulator->old_solution,
+                                                                 old_field_laplacians);
+              fe_values[field_extractor].get_function_laplacians(simulator->old_old_solution,
+                                                                 old_old_field_laplacians);
+              fe_values[this->introspection().extractors.velocities]
+              .get_function_values(simulator->old_solution,
+                                   old_velocity_values);
+              fe_values[this->introspection().extractors.velocities]
+              .get_function_values(simulator->old_old_solution,
+                                   old_old_velocity_values);
+
+              double max_residual_measure = 0.0;
+              for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+                {
+                  const double field_dt =
+                    (old_field_values[q] - old_old_field_values[q])
+                    / snapshot.old_time_step;
+                  const Tensor<1, dim> velocity =
+                    0.5 * (old_velocity_values[q] + old_old_velocity_values[q]);
+                  const Tensor<1, dim> field_gradient =
+                    0.5 * (old_field_gradients[q] + old_old_field_gradients[q]);
+                  const double laplacian =
+                    0.5 * (old_field_laplacians[q] + old_old_field_laplacians[q]);
+                  const double residual =
+                    field_dt + velocity * field_gradient
+                    - maximum_physical_diffusion_per_cell[active_cell_index] * laplacian;
+                  const double history_field =
+                    0.5 * (old_field_values[q] + old_old_field_values[q]);
+                  max_residual_measure =
+                    std::max(max_residual_measure,
+                             std::abs(residual)
+                             * std::abs(history_field - perturbed_average_field));
+                }
+
+              const double c_R =
+                this->get_parameters().stabilization_c_R[advection_field.field_index()];
+              const double h = cell->diameter();
+              const double bar_rmax =
+                coefficient_seed[active_cell_index]
+                * c_R * h * h / global_entropy_variation;
+              local_dot += bar_rmax * max_residual_measure;
+            }
+        return local_dot;
+      };
+
+      double local_bar_average_field = 0.0;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int active_cell_index = cell->active_cell_index();
+            if (coefficient_seed[active_cell_index] == 0.0)
+              continue;
+
+            fe_values.reinit(cell);
+            fe_values[field_extractor].get_function_values(simulator->old_solution,
+                                                           old_field_values);
+            fe_values[field_extractor].get_function_values(simulator->old_old_solution,
+                                                           old_old_field_values);
+            fe_values[field_extractor].get_function_gradients(simulator->old_solution,
+                                                              old_field_gradients);
+            fe_values[field_extractor].get_function_gradients(simulator->old_old_solution,
+                                                              old_old_field_gradients);
+            fe_values[field_extractor].get_function_laplacians(simulator->old_solution,
+                                                               old_field_laplacians);
+            fe_values[field_extractor].get_function_laplacians(simulator->old_old_solution,
+                                                               old_old_field_laplacians);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_values(simulator->old_solution,
+                                 old_velocity_values);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_values(simulator->old_old_solution,
+                                 old_old_velocity_values);
+
+            double max_residual_measure = 0.0;
+            unsigned int max_residual_q = numbers::invalid_unsigned_int;
+            double max_residual_value = 0.0;
+            double max_history_field = 0.0;
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double field_dt =
+                  (old_field_values[q] - old_old_field_values[q])
+                  / snapshot.old_time_step;
+                const Tensor<1, dim> velocity =
+                  0.5 * (old_velocity_values[q] + old_old_velocity_values[q]);
+                const Tensor<1, dim> field_gradient =
+                  0.5 * (old_field_gradients[q] + old_old_field_gradients[q]);
+                const double laplacian =
+                  0.5 * (old_field_laplacians[q] + old_old_field_laplacians[q]);
+                const double residual =
+                  field_dt + velocity * field_gradient
+                  - maximum_physical_diffusion_per_cell[active_cell_index] * laplacian;
+                const double history_field =
+                  0.5 * (old_field_values[q] + old_old_field_values[q]);
+                const double residual_measure =
+                  std::abs(residual) * std::abs(history_field - average_field);
+                if (residual_measure > max_residual_measure)
+                  {
+                    max_residual_measure = residual_measure;
+                    max_residual_q = q;
+                    max_residual_value = residual;
+                    max_history_field = history_field;
+                  }
+              }
+
+            if (max_residual_q != numbers::invalid_unsigned_int)
+              {
+                const double c_R =
+                  this->get_parameters().stabilization_c_R[advection_field.field_index()];
+                const double h = cell->diameter();
+                const double bar_rmax =
+                  coefficient_seed[active_cell_index]
+                  * c_R * h * h / global_entropy_variation;
+                const double entropy_weight_sign =
+                  (max_history_field - average_field > 0.0) ? 1.0 : -1.0;
+                local_bar_average_field -=
+                  entropy_weight_sign * std::abs(max_residual_value) * bar_rmax;
+              }
+          }
+
+      double local_adjoint_dot = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+              {
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false
+                    || this->get_fe().system_to_component_index(i).first != field_component)
+                  continue;
+
+                local_adjoint_dot +=
+                  delta_old(global_index) * previous_field_adjoint(global_index)
+                  + delta_old_old(global_index) * previous_previous_field_adjoint(global_index);
+              }
+          }
+
+      const double fd_dot =
+        Utilities::MPI::sum((plus_dot - minus_dot) / (2.0 * epsilon),
+                            this->get_mpi_communicator());
+      const double adjoint_dot =
+        Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+      const double average_delta = 0.379;
+      const double average_fd_dot =
+        Utilities::MPI::sum((local_rmax_dot_with_average(average_field + epsilon * average_delta)
+                             - local_rmax_dot_with_average(average_field - epsilon * average_delta))
+                            / (2.0 * epsilon),
+                            this->get_mpi_communicator());
+      const double average_adjoint_dot =
+        Utilities::MPI::sum(local_bar_average_field, this->get_mpi_communicator())
+        * average_delta;
+      const unsigned int tested_cells =
+        Utilities::MPI::sum(local_tested_cells, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection local entropy-residual transpose diagnostic: tested cells = "
+                        << tested_cells
+                        << ", FD = "
+                        << std::setprecision(16) << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << ", average-field FD/adjoint = "
+                        << average_fd_dot << "/" << average_adjoint_dot
+                        << std::setprecision(6) << std::endl;
+    }
+
+
+    template <int dim>
+    void
+    ArtificialViscosityAdjoint<dim>::run_estimator_transpose_diagnostic(
+      const AdvectionField &advection_field,
+      const ForwardStateView<dim> &snapshot,
+      const double epsilon) const
+    {
+      // Exercise the complete estimator map
+      //
+      //   (q_old,q_old_old,u_old,u_old_old,C_old,C_old_old) -> {nu_K}
+      //
+      // by checking <bar(nu),D nu[delta x]>=<D nu^T bar(nu),delta x>.
+      // Deterministic trigonometric directions cover every locally owned DoF;
+      // active-set changes at min/max kinks are excluded by the same support
+      // assertions as the production transpose.
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/artificial-viscosity estimator transpose test epsilon must be positive."));
+
+      const Vector<double> &artificial_viscosity_per_cell =
+        simulator->last_advection_artificial_viscosity_per_cell;
+      const Vector<double> &minimum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_min_per_cell;
+      const Vector<double> &maximum_physical_diffusion_per_cell =
+        simulator->last_advection_physical_diffusion_max_per_cell;
+      AssertThrow(artificial_viscosity_per_cell.size()
+                  == this->get_dof_handler().get_triangulation().n_active_cells(),
+                  ExcMessage("The artificial-viscosity estimator transpose diagnostic "
+                             "requires a restored advection assembly with cached "
+                             "cellwise artificial-viscosity coefficients."));
+
+      // A deterministic cellwise bar(nu_K) pattern exercises accumulation
+      // across the complete estimator graph without depending on MPI rank
+      // numbering. Unsupported physical-diffusion cells retain zero seed.
+      std::vector<double> coefficient_seed(artificial_viscosity_per_cell.size(), 0.0);
+      unsigned int local_tested_cells = 0;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int active_cell_index = cell->active_cell_index();
+            const double artificial_viscosity =
+              artificial_viscosity_per_cell[active_cell_index];
+
+            if (artificial_viscosity <= minimum_physical_diffusion_per_cell[active_cell_index])
+              continue;
+
+            AssertThrow(artificial_viscosity > maximum_physical_diffusion_per_cell[active_cell_index],
+                        ExcMessage("The artificial-viscosity estimator transpose diagnostic currently "
+                                   "supports only cells where max(k, nu_art) selects the artificial "
+                                   "diffusion branch at every quadrature point."));
+
+            coefficient_seed[active_cell_index] =
+              std::cos(0.311 * static_cast<double>(active_cell_index + 1));
+            ++local_tested_cells;
+          }
+
+      LinearAlgebra::BlockVector previous_field_adjoint;
+      previous_field_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                                    this->introspection().index_sets.system_relevant_partitioning,
+                                    this->get_mpi_communicator());
+      previous_field_adjoint = 0.0;
+
+      LinearAlgebra::BlockVector previous_previous_field_adjoint;
+      previous_previous_field_adjoint.reinit(this->introspection().index_sets.system_partitioning,
+                                             this->introspection().index_sets.system_relevant_partitioning,
+                                             this->get_mpi_communicator());
+      previous_previous_field_adjoint = 0.0;
+
+      LinearAlgebra::BlockVector previous_stokes_adjoint_rhs;
+      previous_stokes_adjoint_rhs.reinit(this->introspection().index_sets.system_partitioning,
+                                         this->introspection().index_sets.system_relevant_partitioning,
+                                         this->get_mpi_communicator());
+      previous_stokes_adjoint_rhs = 0.0;
+
+      LinearAlgebra::BlockVector previous_previous_stokes_adjoint_rhs;
+      previous_previous_stokes_adjoint_rhs.reinit(this->introspection().index_sets.system_partitioning,
+                                                  this->introspection().index_sets.system_relevant_partitioning,
+                                                  this->get_mpi_communicator());
+      previous_previous_stokes_adjoint_rhs = 0.0;
+
+      add_estimator_transpose(advection_field,
+                              snapshot,
+                              coefficient_seed,
+                              previous_field_adjoint,
+                              snapshot.timestep_number > 1 ? &previous_previous_field_adjoint : nullptr,
+                              previous_stokes_adjoint_rhs,
+                              snapshot.timestep_number > 1 ? &previous_previous_stokes_adjoint_rhs : nullptr);
+
+      const unsigned int field_component =
+        advection_field.component_index(this->introspection());
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::vector<types::global_dof_index> local_dof_indices(this->get_fe().dofs_per_cell);
+      std::set<types::global_dof_index> written_dofs;
+
+      LinearAlgebra::BlockVector delta_old;
+      delta_old.reinit(this->introspection().index_sets.system_partitioning,
+                       this->introspection().index_sets.system_relevant_partitioning,
+                       this->get_mpi_communicator());
+      delta_old = 0.0;
+
+      LinearAlgebra::BlockVector delta_old_old;
+      delta_old_old.reinit(this->introspection().index_sets.system_partitioning,
+                           this->introspection().index_sets.system_relevant_partitioning,
+                           this->get_mpi_communicator());
+      delta_old_old = 0.0;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (component == field_component)
+                  {
+                    delta_old(global_index) =
+                      std::sin(0.193 * static_cast<double>(global_index + 1));
+                    delta_old_old(global_index) =
+                      snapshot.timestep_number > 1
+                      ? std::cos(0.157 * static_cast<double>(global_index + 1))
+                      : delta_old(global_index);
+                  }
+                else if (this->introspection().component_masks.velocities[component])
+                  {
+                    delta_old(global_index) =
+                      std::sin(0.113 * static_cast<double>(global_index + 1));
+                    delta_old_old(global_index) =
+                      snapshot.timestep_number > 1
+                      ? std::cos(0.097 * static_cast<double>(global_index + 1))
+                      : delta_old(global_index);
+                  }
+              }
+          }
+
+      delta_old.compress(VectorOperation::insert);
+      delta_old_old.compress(VectorOperation::insert);
+      this->get_current_constraints().distribute(delta_old);
+      this->get_current_constraints().distribute(delta_old_old);
+
+      double local_adjoint_dot = 0.0;
+      double local_field_adjoint_dot = 0.0;
+      double local_velocity_adjoint_dot = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (component == field_component)
+                  {
+                    const double contribution =
+                      delta_old(global_index)
+                      * previous_field_adjoint(global_index);
+                    local_adjoint_dot += contribution;
+                    local_field_adjoint_dot += contribution;
+
+                    if (snapshot.timestep_number > 1)
+                      {
+                        const double old_old_contribution =
+                          delta_old_old(global_index)
+                          * previous_previous_field_adjoint(global_index);
+                        local_adjoint_dot += old_old_contribution;
+                        local_field_adjoint_dot += old_old_contribution;
+                      }
+                  }
+                else if (this->introspection().component_masks.velocities[component])
+                  {
+                    const double contribution =
+                      delta_old(global_index)
+                      * previous_stokes_adjoint_rhs(global_index);
+                    local_adjoint_dot += contribution;
+                    local_velocity_adjoint_dot += contribution;
+
+                    if (snapshot.timestep_number > 1)
+                      {
+                        const double old_old_contribution =
+                          delta_old_old(global_index)
+                          * previous_previous_stokes_adjoint_rhs(global_index);
+                        local_adjoint_dot += old_old_contribution;
+                        local_velocity_adjoint_dot += old_old_contribution;
+                      }
+                  }
+              }
+          }
+
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+
+      auto recompute_artificial_viscosity_dot =
+        [&](const double sign,
+            const bool perturb_field,
+            const bool perturb_velocity)
+      {
+        simulator->old_solution = snapshot.old_solution.get();
+        simulator->old_old_solution = snapshot.old_old_solution.get();
+        if (perturb_field || perturb_velocity)
+          {
+            LinearAlgebra::BlockVector masked_delta_old(delta_old);
+            LinearAlgebra::BlockVector masked_delta_old_old(delta_old_old);
+            const IndexSet locally_owned_dofs =
+              this->get_dof_handler().locally_owned_dofs();
+            std::vector<types::global_dof_index> local_dof_indices(this->get_fe().dofs_per_cell);
+            std::set<types::global_dof_index> written_dofs;
+            for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+              if (cell->is_locally_owned())
+                {
+                  cell->get_dof_indices(local_dof_indices);
+                  for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+                    {
+                      const unsigned int component =
+                        this->get_fe().system_to_component_index(i).first;
+                      const types::global_dof_index global_index = local_dof_indices[i];
+                      if (locally_owned_dofs.is_element(global_index) == false
+                          || written_dofs.insert(global_index).second == false)
+                        continue;
+
+                      const bool keep =
+                        (perturb_field && component == field_component)
+                        || (perturb_velocity
+                            && this->introspection().component_masks.velocities[component]);
+                      if (keep == false)
+                        {
+                          masked_delta_old(global_index) = 0.0;
+                          masked_delta_old_old(global_index) = 0.0;
+                        }
+                    }
+                }
+            masked_delta_old.compress(VectorOperation::insert);
+            masked_delta_old_old.compress(VectorOperation::insert);
+            simulator->old_solution.add(sign * epsilon, masked_delta_old);
+            simulator->old_old_solution.add(sign * epsilon, masked_delta_old_old);
+          }
+        this->get_current_constraints().distribute(simulator->old_solution);
+        this->get_current_constraints().distribute(simulator->old_old_solution);
+
+        Vector<double> perturbed_viscosity;
+        perturbed_viscosity.reinit(artificial_viscosity_per_cell.size());
+        simulator->get_artificial_viscosity(perturbed_viscosity,
+                                            advection_field);
+
+        double local_dot = 0.0;
+        for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+          if (cell->is_locally_owned())
+            {
+              const unsigned int active_cell_index = cell->active_cell_index();
+              local_dot += coefficient_seed[active_cell_index]
+                           * perturbed_viscosity[active_cell_index];
+            }
+
+        return local_dot;
+      };
+
+      const double plus_dot = recompute_artificial_viscosity_dot(1.0, true, true);
+      const double minus_dot = recompute_artificial_viscosity_dot(-1.0, true, true);
+      const double field_plus_dot = recompute_artificial_viscosity_dot(1.0, true, false);
+      const double field_minus_dot = recompute_artificial_viscosity_dot(-1.0, true, false);
+      const double velocity_plus_dot = recompute_artificial_viscosity_dot(1.0, false, true);
+      const double velocity_minus_dot = recompute_artificial_viscosity_dot(-1.0, false, true);
+
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+
+      const double fd_dot =
+        Utilities::MPI::sum((plus_dot - minus_dot) / (2.0 * epsilon),
+                            this->get_mpi_communicator());
+      const double adjoint_dot =
+        Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+      const double field_fd_dot =
+        Utilities::MPI::sum((field_plus_dot - field_minus_dot) / (2.0 * epsilon),
+                            this->get_mpi_communicator());
+      const double field_adjoint_dot =
+        Utilities::MPI::sum(local_field_adjoint_dot, this->get_mpi_communicator());
+      const double velocity_fd_dot =
+        Utilities::MPI::sum((velocity_plus_dot - velocity_minus_dot) / (2.0 * epsilon),
+                            this->get_mpi_communicator());
+      const double velocity_adjoint_dot =
+        Utilities::MPI::sum(local_velocity_adjoint_dot, this->get_mpi_communicator());
+      const unsigned int tested_cells =
+        Utilities::MPI::sum(local_tested_cells, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   "
+                        << (advection_field.is_temperature() ? "Temperature" : "Composition")
+                        << "-advection artificial-viscosity estimator transpose diagnostic: tested cells = "
+                        << tested_cells
+                        << ", FD = "
+                        << std::setprecision(16) << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << ", field FD/adjoint = " << field_fd_dot
+                        << "/" << field_adjoint_dot
+                        << ", velocity FD/adjoint = " << velocity_fd_dot
+                        << "/" << velocity_adjoint_dot
+                        << std::setprecision(6) << std::endl;
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template void Adjoint::ArtificialViscosityAdjoint<dim>::run_coefficient_seed_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, \
+      const LinearAlgebra::BlockVector &, const std::vector<double> &, const double) const; \
+  template void Adjoint::ArtificialViscosityAdjoint<dim>::run_global_entropy_variation_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::ArtificialViscosityAdjoint<dim>::run_global_entropy_denominator_scalar_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::ArtificialViscosityAdjoint<dim>::run_local_entropy_residual_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const; \
+  template void Adjoint::ArtificialViscosityAdjoint<dim>::run_estimator_transpose_diagnostic( \
+      const AdvectionField &, const Adjoint::ForwardStateView<dim> &, const double) const;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/diagnostics/artificial_viscosity_diagnostics.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/diagnostics/diagnostics.cc
+========================================================================================
+
+/*
+  Copyright (C) 2026 by the ASPECT authors.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+*/
+
+#include <aspect/adjoint/diagnostics/diagnostics.h>
+
+#include <aspect/adjoint/core/manager.h>
+
+#include <deal.II/base/mpi.h>
+#include <deal.II/base/utilities.h>
+
+#include <iostream>
+#include <sstream>
+
+#if defined(__APPLE__)
+#  include <mach/mach.h>
+#endif
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace Diagnostics
+    {
+      template <int dim>
+      InitialTemperatureOptimizationChecks<dim>::InitialTemperatureOptimizationChecks(
+        ::aspect::Adjoint::Manager<dim> &adjoint_manager)
+        :
+        manager(adjoint_manager)
+      {}
+
+
+
+      template <int dim>
+      void
+      InitialTemperatureOptimizationChecks<dim>::reuse() const
+      {
+        manager.run_initial_temperature_control_reuse_diagnostic();
+      }
+
+
+
+      template <int dim>
+      void
+      InitialTemperatureOptimizationChecks<dim>::single_evaluation() const
+      {
+        manager.run_initial_temperature_control_single_evaluation_diagnostic();
+      }
+
+
+
+      template <int dim>
+      void
+      InitialTemperatureOptimizationChecks<dim>::taylor() const
+      {
+        manager.run_initial_temperature_control_taylor_diagnostic();
+      }
+
+
+
+      template <int dim>
+      void
+      InitialTemperatureOptimizationChecks<dim>::initialization_stage(
+        const unsigned int stage) const
+      {
+        manager.run_initial_temperature_control_initialization_diagnostic(stage);
+      }
+
+
+
+      template <int dim>
+      AdvectionOperatorChecks<dim>::AdvectionOperatorChecks(
+        AdvectionAdjointCalculator<dim> &advection_calculator)
+        :
+        calculator(advection_calculator)
+      {}
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::velocity_transpose(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const LinearAlgebra::BlockVector &current_field_adjoint,
+        const double epsilon) const
+      {
+        calculator.run_velocity_transpose_diagnostic(advection_field,
+                                                     snapshot,
+                                                     current_field_adjoint,
+                                                     epsilon);
+      }
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::transposed_constraints(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const LinearAlgebra::BlockVector &current_field_adjoint) const
+      {
+        calculator.run_transposed_advection_constraint_diagnostic(advection_field,
+                                                                  snapshot,
+                                                                  current_field_adjoint);
+      }
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::artificial_viscosity_coefficient_seed(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const LinearAlgebra::BlockVector &current_field_adjoint,
+        const double epsilon) const
+      {
+        calculator.run_artificial_viscosity_coefficient_seed_diagnostic(
+          advection_field, snapshot, current_field_adjoint, epsilon);
+      }
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::artificial_viscosity_estimator_transpose(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const double epsilon) const
+      {
+        calculator.run_artificial_viscosity_estimator_transpose_diagnostic(
+          advection_field, snapshot, epsilon);
+      }
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::local_entropy_residual_transpose(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const double epsilon) const
+      {
+        calculator.run_local_entropy_residual_transpose_diagnostic(advection_field,
+                                                                   snapshot,
+                                                                   epsilon);
+      }
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::global_entropy_denominator_scalar(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const double epsilon) const
+      {
+        calculator.run_global_entropy_denominator_scalar_diagnostic(advection_field,
+                                                                    snapshot,
+                                                                    epsilon);
+      }
+
+
+
+      template <int dim>
+      void
+      AdvectionOperatorChecks<dim>::global_entropy_variation_transpose(
+        const AdvectionField &advection_field,
+        const ForwardStateView<dim> &snapshot,
+        const double epsilon) const
+      {
+        calculator.run_global_entropy_variation_transpose_diagnostic(advection_field,
+                                                                     snapshot,
+                                                                     epsilon);
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::set_output_memory_checkpoints(const bool enabled)
+      {
+        output_memory_checkpoints = enabled;
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::report_trajectory(
+        const TrajectoryStore &trajectory,
+        const std::string &stage,
+        const std::size_t local_cache_memory,
+        const std::size_t local_current_record_memory,
+        const unsigned int stokes_recovery_solves,
+        const unsigned int sparse_peak_window_state_count,
+        const unsigned int sparse_replay_transition_count,
+        const unsigned int sparse_restart_replay_transition_count) const
+      {
+        // Keep accounting layers distinct: TrajectoryStore reports local
+        // durable payload bytes, while callers report transient reconstructed
+        // vectors. Summing local payload categories measures aggregate MPI
+        // storage; max(VmRSS/VmPeak) identifies the worst rank rather than
+        // producing a physically meaningless sum of process high-water marks.
+        const TrajectoryStorageStatistics local_storage =
+          trajectory.storage_statistics();
+        const auto sum_bytes = [this](const std::size_t value)
+        {
+          return Utilities::MPI::sum(static_cast<unsigned long long>(value),
+                                     this->get_mpi_communicator());
+        };
+
+        // In minimal mode the currently reconstructed record contains u,p that
+        // were absent on disk. Attribute its memory separately so diagnostics
+        // expose the storage/recomputation tradeoff instead of hiding it in
+        // the generic reverse cache total.
+        const std::size_t local_recovered_stokes_memory =
+          trajectory.mode() == TrajectoryStorageMode::minimal
+          ? local_current_record_memory : 0;
+
+        dealii::Utilities::System::MemoryStats process_memory {};
+        dealii::Utilities::System::get_memory_stats(process_memory);
+        const unsigned long int vm_peak =
+          dealii::Utilities::MPI::max(process_memory.VmPeak,
+                                      this->get_mpi_communicator());
+        const unsigned long int vm_rss =
+          dealii::Utilities::MPI::max(process_memory.VmRSS,
+                                      this->get_mpi_communicator());
+
+        const char *mode_name =
+          trajectory.mode() == TrajectoryStorageMode::minimal
+          ? "minimal (T,C)" : "stokes cached (T,C,u,p)";
+        this->get_pcout() << "   Adjoint trajectory archive [" << stage << "]: mode = "
+                          << mode_name
+                          << ", records = " << trajectory.size()
+                          << ", total bytes = " << sum_bytes(local_storage.total_bytes())
+                          << ", mean bytes/record = "
+                          << (trajectory.size() == 0 ? 0
+                              : sum_bytes(local_storage.total_bytes()) / trajectory.size())
+                          << " (metadata " << sum_bytes(local_storage.metadata_bytes)
+                          << ", T " << sum_bytes(local_storage.temperature_bytes)
+                          << ", C " << sum_bytes(local_storage.composition_bytes)
+                          << ", u " << sum_bytes(local_storage.velocity_bytes)
+                          << ", p " << sum_bytes(local_storage.pressure_bytes)
+                          << ")." << std::endl;
+        this->get_pcout() << "   Adjoint trajectory memory [" << stage
+                          << "]: metadata object bytes = "
+                          << sum_bytes(trajectory.memory_consumption())
+                          << ", current loaded record bytes = "
+                          << sum_bytes(local_current_record_memory)
+                          << ", current recovered Stokes-state bytes = "
+                          << sum_bytes(local_recovered_stokes_memory)
+                          << ", reverse working-cache bytes = "
+                          << sum_bytes(local_cache_memory)
+                          << ", VmPeak = " << vm_peak << " kB, VmRSS = "
+                          << vm_rss << " kB, Stokes recovery solves = "
+                          << stokes_recovery_solves << "." << std::endl;
+        this->get_pcout() << "ASPECT_ADJOINT_SPARSE_STORAGE stage=" << stage
+                          << " dense_schedule_bytes=" << sum_bytes(local_storage.metadata_bytes)
+                          << " anchor_payload_bytes="
+                          << sum_bytes(local_storage.temperature_bytes
+                                       + local_storage.composition_bytes
+                                       + local_storage.velocity_bytes
+                                       + local_storage.pressure_bytes)
+                          << " shared_segment_count=" << trajectory.shared_segment_count()
+                          << " archive_bytes=" << trajectory.shared_archive_bytes()
+                          << " peak_replay_window_state_count="
+                          << sparse_peak_window_state_count
+                          << " total_replayed_transitions=" << sparse_replay_transition_count
+                          << " restart_induced_extra_replay_transitions="
+                          << sparse_restart_replay_transition_count
+                          << std::endl;
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::report_memory_checkpoint(
+        const std::string &stage,
+        const LinearAlgebra::BlockVector &state,
+        const std::size_t reverse_cache_size) const
+      {
+        if (!output_memory_checkpoints)
+          return;
+
+        // Count ownership and relevance independently. Their difference is a
+        // useful proxy for ghost/import pressure, while state.memory_consumption
+        // would mix allocator overhead with the semantic vector layout.
+        std::size_t locally_owned_dofs = 0;
+        for (unsigned int block = 0; block < state.n_blocks(); ++block)
+          locally_owned_dofs += state.block(block).locally_owned_elements().n_elements();
+
+        std::size_t locally_relevant_dofs = 0;
+        for (const IndexSet &index_set :
+             this->introspection().index_sets.system_relevant_partitioning)
+          locally_relevant_dofs += index_set.n_elements();
+
+        // Normalize platform-specific process metrics to bytes. This method is
+        // observational only and performs no distributed allocation, so it is
+        // safe around the memory-sensitive sparse replay checkpoints.
+        std::size_t rss_bytes = 0;
+#if defined(__APPLE__)
+        mach_task_basic_info_data_t task_info_data;
+        mach_msg_type_number_t task_info_count = MACH_TASK_BASIC_INFO_COUNT;
+        if (task_info(mach_task_self(),
+                      MACH_TASK_BASIC_INFO,
+                      reinterpret_cast<task_info_t>(&task_info_data),
+                      &task_info_count) == KERN_SUCCESS)
+          rss_bytes = task_info_data.resident_size;
+#else
+        dealii::Utilities::System::MemoryStats process_memory {};
+        dealii::Utilities::System::get_memory_stats(process_memory);
+        rss_bytes = process_memory.VmRSS * 1024ULL;
+#endif
+
+        // Emit one complete line per rank in a single write to reduce
+        // interleaving in MPI stderr logs and make the record machine-parseable.
+        std::ostringstream output;
+        output << "ASPECT_ADJOINT_MPI_MEMORY rank="
+               << Utilities::MPI::this_mpi_process(this->get_mpi_communicator())
+               << " stage=\"" << stage << "\""
+               << " rss_bytes=" << rss_bytes
+               << " global_vector_size=" << state.size()
+               << " locally_owned_dofs=" << locally_owned_dofs
+               << " locally_relevant_dofs=" << locally_relevant_dofs
+               << " reverse_cache_size=" << reverse_cache_size
+               << '\n';
+        std::cerr << output.str() << std::flush;
+      }
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template class Adjoint::Diagnostics::Manager<dim>; \
+  template class Adjoint::Diagnostics::AdvectionOperatorChecks<dim>; \
+  template class Adjoint::Diagnostics::InitialTemperatureOptimizationChecks<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/diagnostics/diagnostics.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/diagnostics/manager_diagnostics.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/core/manager.h>
+#include <aspect/adjoint/core/instantaneous_stokes_workflow.h>
+#include <aspect/adjoint/core/simulator_state.h>
+#include <aspect/adjoint/operators/stokes_adjoint_solver.h>
+#include <aspect/adjoint/objective/temperature_field_objective.h>
+
+#include <aspect/geometry_model/box.h>
+#include <aspect/gravity_model/vertical.h>
+#include <aspect/material_model/simple.h>
+#include <aspect/adjoint/operators/advection_adjoint_calculator.h>
+#include <aspect/adjoint/operators/boundary_conditions.h>
+#include <aspect/adjoint/operators/material_model_adjoint.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/simulator.h>
+#include <aspect/simulator/solver/stokes_matrix_free.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/base/table_handler.h>
+#include <deal.II/base/utilities.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <set>
+#include <string>
+
+#if defined(__APPLE__)
+#  include <mach/mach.h>
+#endif
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    void
+    Manager<dim>::run_composition_stokes_rhs_transpose_test(const ForwardStateView<dim> &snapshot)
+    {
+      // Verify the material-mediated Stokes residual edge C -> (b-Au):
+      //
+      //   psi^T [R(C+eps delta_C)-R(C-eps delta_C)]/(2 eps)
+      //       = delta_C^T (partial R/partial C)^T psi.
+      //
+      // The deterministic perturbation and test velocity are distributed FE
+      // fields; all scalar contractions are reduced over owned DoFs only.
+      if (this->introspection().n_compositional_fields == 0)
+        return;
+
+      const double epsilon =
+        composition_stokes_rhs_transpose_diagnostic_epsilon;
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/C to Stokes RHS transpose test epsilon must be positive."));
+
+      const AdvectionField composition_field = AdvectionField::composition(0);
+      const unsigned int composition_component =
+        composition_field.component_index(this->introspection());
+      const unsigned int velocity_block_index =
+        this->introspection().block_indices.velocities;
+
+      LinearAlgebra::BlockVector delta_composition;
+      delta_composition.reinit(this->introspection().index_sets.system_partitioning,
+                               this->introspection().index_sets.system_relevant_partitioning,
+                               this->get_mpi_communicator());
+      delta_composition = 0.0;
+
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::vector<types::global_dof_index> local_dof_indices(this->get_fe().dofs_per_cell);
+      std::set<types::global_dof_index> written_dofs;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              if (this->get_fe().system_to_component_index(i).first == composition_component)
+                {
+                  const types::global_dof_index global_index = local_dof_indices[i];
+                  if (locally_owned_dofs.is_element(global_index) == false
+                      || written_dofs.insert(global_index).second == false)
+                    continue;
+
+                  delta_composition(global_index) =
+                    std::sin(0.173 * static_cast<double>(global_index + 1));
+                }
+          }
+
+      delta_composition.compress(VectorOperation::insert);
+      // The trigonometric direction is deterministic across partitions and
+      // nonzero on a broad set of DoFs. Distributing constraints turns it into
+      // an admissible perturbation before either side of the identity uses it.
+      this->get_current_constraints().distribute(delta_composition);
+
+      // Use the primal velocity as a reproducible test covector psi and zero
+      // every non-velocity block. This probes both density buoyancy and
+      // viscosity bilinear-form contributions without a pressure test seed.
+      LinearAlgebra::BlockVector stokes_test_vector(snapshot.solution.get());
+      for (unsigned int block = 0; block < stokes_test_vector.n_blocks(); ++block)
+        if (block != velocity_block_index)
+          stokes_test_vector.block(block) = 0.0;
+      stokes_test_vector.compress(VectorOperation::insert);
+
+      LinearAlgebra::BlockVector adjoint_field;
+      adjoint_field.reinit(this->introspection().index_sets.system_partitioning,
+                           this->introspection().index_sets.system_relevant_partitioning,
+                           this->get_mpi_communicator());
+      adjoint_field = 0.0;
+      add_stokes_rhs_field_transpose(composition_field,
+                                     snapshot,
+                                     stokes_test_vector,
+                                     adjoint_field);
+
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const bool saved_rebuild_stokes_matrix = simulator->rebuild_stokes_matrix;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      auto restore_state = [&]()
+      {
+        simulator->solution = saved_solution;
+        simulator->old_solution = saved_old_solution;
+        simulator->old_old_solution = saved_old_old_solution;
+        simulator->current_linearization_point = saved_linearization_point;
+        simulator->system_rhs = saved_system_rhs;
+        simulator->rebuild_stokes_matrix = saved_rebuild_stokes_matrix;
+        simulator->time = saved_time;
+        simulator->time_step = saved_time_step;
+        simulator->old_time_step = saved_old_time_step;
+        simulator->timestep_number = saved_timestep_number;
+        simulator->last_pressure_normalization_adjustment =
+          saved_pressure_normalization_adjustment;
+      };
+
+      auto assemble_stokes_residual_for_composition_perturbation =
+        [&](const double sign)
+      {
+        // Reassemble b(C)-A(C)u at fixed primal u for C+/-eps delta_C. This is
+        // the finite-difference counterpart of add_stokes_rhs_field_transpose;
+        // solving a perturbed Stokes system here would test an additional
+        // implicit inverse and obscure residual-level errors.
+        simulator->solution = snapshot.solution.get();
+        simulator->old_solution = snapshot.old_solution.get();
+        simulator->old_old_solution = snapshot.old_old_solution.get();
+        simulator->current_linearization_point = snapshot.stokes_linearization_point.get();
+        simulator->current_linearization_point.add(sign * epsilon,
+                                                   delta_composition);
+        simulator->time = snapshot.time;
+        simulator->time_step = snapshot.time_step;
+        simulator->old_time_step = snapshot.old_time_step;
+        simulator->timestep_number = snapshot.timestep_number;
+        simulator->last_pressure_normalization_adjustment =
+          snapshot.pressure_normalization_adjustment;
+
+        simulator->rebuild_stokes_matrix = true;
+        simulator->assemble_stokes_system();
+        LinearAlgebra::BlockVector matrix_times_solution;
+        matrix_times_solution.reinit(simulator->system_rhs);
+        simulator->system_matrix.vmult(matrix_times_solution,
+                                       snapshot.solution.get());
+
+        LinearAlgebra::BlockVector residual(simulator->system_rhs);
+        residual.add(-1.0, matrix_times_solution);
+        return residual;
+      };
+
+      const LinearAlgebra::BlockVector residual_plus =
+        assemble_stokes_residual_for_composition_perturbation(1.0);
+      const LinearAlgebra::BlockVector residual_minus =
+        assemble_stokes_residual_for_composition_perturbation(-1.0);
+
+      double local_coefficient_fd_dot = 0.0;
+      const MaterialModel::NonlinearDependence::ModelDependence model_dependence =
+        this->get_material_model().get_model_dependence();
+      const bool viscosity_depends_on_composition =
+        (static_cast<int>(model_dependence.viscosity)
+         & static_cast<int>(MaterialModel::NonlinearDependence::compositional_fields)) != 0;
+      if (viscosity_depends_on_composition)
+        {
+          // When eta(C) changes, composition affects the matrix A as well as
+          // buoyancy. Isolate the coefficient contraction
+          // -2 eps(u):eps(psi) D eta[delta_C] so it can be compared directly
+          // with the material VJP returned by the production transpose.
+          LinearAlgebra::BlockVector linearization_plus(snapshot.stokes_linearization_point.get());
+          LinearAlgebra::BlockVector linearization_minus(snapshot.stokes_linearization_point.get());
+          linearization_plus.add(epsilon, delta_composition);
+          linearization_minus.add(-epsilon, delta_composition);
+
+          const Quadrature<dim> &quadrature_formula =
+            this->introspection().quadratures.velocities;
+          FEValues<dim> fe_values(this->get_mapping(),
+                                  this->get_fe(),
+                                  quadrature_formula,
+                                  update_values |
+                                  update_gradients |
+                                  update_quadrature_points |
+                                  update_JxW_values);
+          std::vector<SymmetricTensor<2,dim>> forward_velocity_symmetric_gradients(quadrature_formula.size());
+          std::vector<SymmetricTensor<2,dim>> psi_velocity_symmetric_gradients(quadrature_formula.size());
+
+          for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+            if (cell->is_locally_owned())
+              {
+                fe_values.reinit(cell);
+                fe_values[this->introspection().extractors.velocities]
+                .get_function_symmetric_gradients(snapshot.solution.get(),
+                                                  forward_velocity_symmetric_gradients);
+                fe_values[this->introspection().extractors.velocities]
+                .get_function_symmetric_gradients(stokes_test_vector,
+                                                  psi_velocity_symmetric_gradients);
+
+                MaterialModel::MaterialModelInputs<dim> in_plus(fe_values,
+                                                                cell,
+                                                                this->introspection(),
+                                                                linearization_plus);
+                MaterialModel::MaterialModelInputs<dim> in_minus(fe_values,
+                                                                 cell,
+                                                                 this->introspection(),
+                                                                 linearization_minus);
+                MaterialModel::MaterialModelOutputs<dim> out_plus(fe_values.n_quadrature_points,
+                                                                  this->n_compositional_fields());
+                MaterialModel::MaterialModelOutputs<dim> out_minus(fe_values.n_quadrature_points,
+                                                                   this->n_compositional_fields());
+                in_plus.requested_properties = MaterialModel::MaterialProperties::viscosity;
+                in_minus.requested_properties = MaterialModel::MaterialProperties::viscosity;
+                this->get_material_model().evaluate(in_plus, out_plus);
+                this->get_material_model().evaluate(in_minus, out_minus);
+
+                for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+                  {
+                    const double bar_eta =
+                      -2.0
+                      * (forward_velocity_symmetric_gradients[q]
+                         * psi_velocity_symmetric_gradients[q])
+                      * fe_values.JxW(q);
+                    local_coefficient_fd_dot +=
+                      bar_eta
+                      * (out_plus.viscosities[q] - out_minus.viscosities[q])
+                      / (2.0 * epsilon);
+                  }
+              }
+        }
+
+      double local_fd_dot = 0.0;
+      double local_adjoint_dot = 0.0;
+      written_dofs.clear();
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (this->introspection().component_masks.velocities[component])
+                  // Left side: psi^T D_C R delta_C over owned Stokes rows.
+                  local_fd_dot += stokes_test_vector(global_index)
+                                  * (residual_plus(global_index) - residual_minus(global_index))
+                                  / (2.0 * epsilon);
+
+                if (component == composition_component)
+                  // Right side: delta_C^T D_C R^T psi over owned C rows.
+                  local_adjoint_dot += delta_composition(global_index)
+                                       * adjoint_field(global_index);
+              }
+          }
+
+      const double fd_dot =
+        Utilities::MPI::sum(local_fd_dot, this->get_mpi_communicator());
+      const double adjoint_dot =
+        Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+      if (viscosity_depends_on_composition)
+        {
+          const double coefficient_fd_dot =
+            Utilities::MPI::sum(local_coefficient_fd_dot, this->get_mpi_communicator());
+          const double coefficient_relative_error =
+            std::abs(coefficient_fd_dot - adjoint_dot)
+            / std::max({std::abs(coefficient_fd_dot), std::abs(adjoint_dot), 1e-30});
+
+          this->get_pcout() << "   C-to-Stokes-viscosity-coefficient transpose diagnostic for field '"
+                            << this->introspection().name_for_compositional_index(0)
+                            << "': FD = "
+                            << std::setprecision(16) << coefficient_fd_dot
+                            << ", adjoint = " << adjoint_dot
+                            << ", relative error = " << coefficient_relative_error
+                            << std::setprecision(6) << std::endl;
+
+          AssertThrow(coefficient_relative_error <= 1e-5,
+                      ExcMessage("The C-to-Stokes viscosity-coefficient transpose diagnostic failed."));
+
+          this->get_pcout() << "   Skipping legacy C-to-Stokes RHS/solve transpose diagnostics for field '"
+                            << this->introspection().name_for_compositional_index(0)
+                            << "' because composition-dependent viscosity changes the Stokes matrix, "
+                            << "not only the assembled right hand side." << std::endl;
+          restore_state();
+          return;
+        }
+      const double relative_error =
+        std::abs(fd_dot - adjoint_dot)
+        / std::max({std::abs(fd_dot), std::abs(adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   C-to-Stokes-residual transpose diagnostic for field '"
+                        << this->introspection().name_for_compositional_index(0)
+                        << "': FD = "
+                        << std::setprecision(16) << fd_dot
+                        << ", adjoint = " << adjoint_dot
+                        << ", relative error = " << relative_error
+                        << std::setprecision(6) << std::endl;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.stokes_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+      simulator->rebuild_stokes_matrix = true;
+      simulator->assemble_stokes_system();
+
+      // A second check includes the implicit Stokes solution map. For a probe
+      // r, solve A^T psi=r and compare r^T D_C u delta_C with the same material
+      // transpose contraction using psi. This validates the composition edge
+      // as it is actually consumed by the time-dependent reverse workflow.
+      LinearAlgebra::BlockVector stokes_probe_rhs;
+      stokes_probe_rhs.reinit(this->introspection().index_sets.system_partitioning,
+                              this->introspection().index_sets.system_relevant_partitioning,
+                              this->get_mpi_communicator());
+      stokes_probe_rhs = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (this->introspection().component_masks.velocities[component])
+                  stokes_probe_rhs(global_index) =
+                    std::cos(0.137 * static_cast<double>(global_index + 1));
+              }
+          }
+      stokes_probe_rhs.compress(VectorOperation::insert);
+      this->get_current_constraints().distribute(stokes_probe_rhs);
+
+      LinearAlgebra::BlockVector stokes_adjoint_probe;
+      solve_stokes_adjoint_from_rhs(stokes_probe_rhs,
+                                    stokes_adjoint_probe);
+
+      auto solve_stokes_for_composition_perturbation =
+        [&](const double sign)
+      {
+        simulator->solution = snapshot.solution.get();
+        simulator->old_solution = snapshot.old_solution.get();
+        simulator->old_old_solution = snapshot.old_old_solution.get();
+        simulator->current_linearization_point = snapshot.stokes_linearization_point.get();
+        simulator->current_linearization_point.add(sign * epsilon,
+                                                   delta_composition);
+        simulator->time = snapshot.time;
+        simulator->time_step = snapshot.time_step;
+        simulator->old_time_step = snapshot.old_time_step;
+        simulator->timestep_number = snapshot.timestep_number;
+        simulator->last_pressure_normalization_adjustment =
+          snapshot.pressure_normalization_adjustment;
+
+        simulator->rebuild_stokes_matrix = true;
+        simulator->assemble_stokes_system();
+
+        LinearAlgebra::BlockVector perturbed_solution(snapshot.solution.get());
+        simulator->solve_stokes(perturbed_solution);
+        return perturbed_solution;
+      };
+
+      const LinearAlgebra::BlockVector stokes_solution_plus =
+        solve_stokes_for_composition_perturbation(1.0);
+      const LinearAlgebra::BlockVector stokes_solution_minus =
+        solve_stokes_for_composition_perturbation(-1.0);
+
+      LinearAlgebra::BlockVector solved_adjoint_field;
+      solved_adjoint_field.reinit(this->introspection().index_sets.system_partitioning,
+                                  this->introspection().index_sets.system_relevant_partitioning,
+                                  this->get_mpi_communicator());
+      solved_adjoint_field = 0.0;
+      add_stokes_rhs_field_transpose(composition_field,
+                                     snapshot,
+                                     stokes_adjoint_probe,
+                                     solved_adjoint_field);
+
+      double local_solved_fd_dot = 0.0;
+      double local_solved_adjoint_dot = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < this->get_fe().dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (this->introspection().component_masks.velocities[component])
+                  local_solved_fd_dot += stokes_probe_rhs(global_index)
+                                         * (stokes_solution_plus(global_index)
+                                            - stokes_solution_minus(global_index))
+                                         / (2.0 * epsilon);
+
+                if (component == composition_component)
+                  local_solved_adjoint_dot += delta_composition(global_index)
+                                              * solved_adjoint_field(global_index);
+              }
+          }
+
+      const double solved_fd_dot =
+        Utilities::MPI::sum(local_solved_fd_dot, this->get_mpi_communicator());
+      const double solved_adjoint_dot =
+        Utilities::MPI::sum(local_solved_adjoint_dot, this->get_mpi_communicator());
+      const double solved_relative_error =
+        std::abs(solved_fd_dot - solved_adjoint_dot)
+        / std::max({std::abs(solved_fd_dot), std::abs(solved_adjoint_dot), 1e-30});
+
+      this->get_pcout() << "   C-to-Stokes-solve transpose diagnostic for field '"
+                        << this->introspection().name_for_compositional_index(0)
+                        << "': FD = "
+                        << std::setprecision(16) << solved_fd_dot
+                        << ", adjoint = " << solved_adjoint_dot
+                        << ", relative error = " << solved_relative_error
+                        << std::setprecision(6) << std::endl;
+
+      restore_state();
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_direct_stokes_viscosity_derivative_test(const ForwardStateView<dim> &snapshot)
+    {
+      // Isolate viscosity as an independent quadrature property in the weak
+      // Stokes residual. The analytic contraction
+      // 2 delta_eta eps(u):eps(psi) is compared with a central difference of
+      // the assembled residual while density and all state variables remain
+      // fixed. This separates assembly signs/factors from material-model VJP.
+      const double epsilon =
+        direct_stokes_viscosity_derivative_diagnostic_epsilon;
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/direct Stokes viscosity derivative test epsilon must be positive."));
+
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      const Quadrature<dim> &quadrature_formula =
+        this->introspection().quadratures.velocities;
+
+      LinearAlgebra::BlockVector stokes_test_vector(snapshot.solution.get());
+      stokes_test_vector = 0.0;
+
+      const IndexSet locally_owned_dofs =
+        this->get_dof_handler().locally_owned_dofs();
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+      std::set<types::global_dof_index> written_dofs;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (this->introspection().component_masks.velocities[component])
+                  stokes_test_vector(global_index) =
+                    std::cos(0.211 * static_cast<double>(global_index + 1));
+              }
+          }
+
+      stokes_test_vector.compress(VectorOperation::insert);
+      this->get_current_constraints().distribute(stokes_test_vector);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_gradients |
+                              update_quadrature_points |
+                              update_JxW_values);
+
+      std::vector<SymmetricTensor<2,dim>> forward_velocity_symmetric_gradients(quadrature_formula.size());
+      std::vector<SymmetricTensor<2,dim>> psi_velocity_symmetric_gradients(quadrature_formula.size());
+      Vector<double> local_residual_plus(dofs_per_cell);
+      Vector<double> local_residual_minus(dofs_per_cell);
+
+      LinearAlgebra::BlockVector residual_plus;
+      residual_plus.reinit(this->introspection().index_sets.system_partitioning,
+                           this->introspection().index_sets.system_relevant_partitioning,
+                           this->get_mpi_communicator());
+      residual_plus = 0.0;
+
+      LinearAlgebra::BlockVector residual_minus;
+      residual_minus.reinit(this->introspection().index_sets.system_partitioning,
+                            this->introspection().index_sets.system_relevant_partitioning,
+                            this->get_mpi_communicator());
+      residual_minus = 0.0;
+
+      double local_direct_dot = 0.0;
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_symmetric_gradients(snapshot.solution.get(),
+                                              forward_velocity_symmetric_gradients);
+            fe_values[this->introspection().extractors.velocities]
+            .get_function_symmetric_gradients(stokes_test_vector,
+                                              psi_velocity_symmetric_gradients);
+
+            local_residual_plus = 0.0;
+            local_residual_minus = 0.0;
+            cell->get_dof_indices(local_dof_indices);
+
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                // delta_eta is an independent quadrature perturbation. The
+                // direct expression is -2 delta_eta eps(u):eps(psi) JxW, while
+                // local_residual_+/- store the corresponding weak residual
+                // perturbations for the central-difference contraction.
+                const double delta_eta =
+                  std::sin(0.317 * static_cast<double>(cell->active_cell_index() + 1)
+                           + 0.193 * static_cast<double>(q + 1));
+
+                local_direct_dot +=
+                  -2.0
+                  * (forward_velocity_symmetric_gradients[q]
+                     * psi_velocity_symmetric_gradients[q])
+                  * delta_eta
+                  * fe_values.JxW(q);
+
+                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                  if (this->introspection().component_masks.velocities[
+                        this->get_fe().system_to_component_index(i).first])
+                    {
+                      const SymmetricTensor<2,dim> epsilon_phi_i =
+                        fe_values[this->introspection().extractors.velocities]
+                        .symmetric_gradient(i, q);
+                      const double residual_contribution =
+                        -2.0
+                        * delta_eta
+                        * (epsilon_phi_i
+                           * forward_velocity_symmetric_gradients[q])
+                        * fe_values.JxW(q);
+
+                      local_residual_plus(i) += epsilon * residual_contribution;
+                      local_residual_minus(i) -= epsilon * residual_contribution;
+                    }
+              }
+
+            this->get_current_constraints().distribute_local_to_global(local_residual_plus,
+                                                                       local_dof_indices,
+                                                                       residual_plus);
+            this->get_current_constraints().distribute_local_to_global(local_residual_minus,
+                                                                       local_dof_indices,
+                                                                       residual_minus);
+          }
+
+      residual_plus.compress(VectorOperation::add);
+      residual_minus.compress(VectorOperation::add);
+
+      double local_fd_dot = 0.0;
+      written_dofs.clear();
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            cell->get_dof_indices(local_dof_indices);
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+              {
+                const unsigned int component =
+                  this->get_fe().system_to_component_index(i).first;
+                const types::global_dof_index global_index = local_dof_indices[i];
+                if (locally_owned_dofs.is_element(global_index) == false
+                    || written_dofs.insert(global_index).second == false)
+                  continue;
+
+                if (this->introspection().component_masks.velocities[component])
+                  local_fd_dot +=
+                    stokes_test_vector(global_index)
+                    * (residual_plus(global_index) - residual_minus(global_index))
+                    / (2.0 * epsilon);
+              }
+          }
+
+      const double fd_dot =
+        Utilities::MPI::sum(local_fd_dot, this->get_mpi_communicator());
+      const double direct_dot =
+        Utilities::MPI::sum(local_direct_dot, this->get_mpi_communicator());
+      const double relative_error =
+        std::abs(fd_dot - direct_dot)
+        / std::max({std::abs(fd_dot), std::abs(direct_dot), 1e-30});
+
+      this->get_pcout() << "   Direct Stokes viscosity derivative diagnostic: FD = "
+                        << std::setprecision(16) << fd_dot
+                        << ", direct = " << direct_dot
+                        << ", relative error = " << relative_error
+                        << std::setprecision(6) << std::endl;
+
+      AssertThrow(relative_error <= 1e-5,
+                  ExcMessage("The direct Stokes viscosity derivative diagnostic failed."));
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::run_material_model_adjoint_vjp_test(const ForwardStateView<dim> &snapshot) const
+    {
+      // Check the local material-model vector-Jacobian product by the standard
+      // dot-product identity
+      //
+      //   bar(y)^T [F(x+eps delta_x)-F(x-eps delta_x)]/(2 eps)
+      //       = [DF(x)^T bar(y)]^T delta_x.
+      //
+      // The diagnostic requests exactly the output properties supported by
+      // the production adjoint backend and performs MPI reduction only after
+      // forming rank-local quadrature contractions.
+      AssertThrow(material_model_name == "simple"
+                  || material_model_name == "adjoint material model",
+                  ExcMessage("The standalone material model adjoint VJP diagnostic is currently "
+                             "restricted to Material model/Model name = simple or "
+                             "adjoint material model."));
+      const double epsilon = material_model_adjoint_vjp_diagnostic_epsilon;
+      AssertThrow(epsilon > 0.0,
+                  ExcMessage("Adjoint/material model VJP test epsilon must be positive."));
+
+      const LinearAlgebra::BlockVector saved_solution = simulator->solution;
+      const LinearAlgebra::BlockVector saved_old_solution = simulator->old_solution;
+      const LinearAlgebra::BlockVector saved_old_old_solution = simulator->old_old_solution;
+      const LinearAlgebra::BlockVector saved_linearization_point = simulator->current_linearization_point;
+      const LinearAlgebra::BlockVector saved_system_rhs = simulator->system_rhs;
+      const double saved_time = simulator->time;
+      const double saved_time_step = simulator->time_step;
+      const double saved_old_time_step = simulator->old_time_step;
+      const unsigned int saved_timestep_number = simulator->timestep_number;
+      const double saved_pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+
+      simulator->solution = snapshot.solution.get();
+      simulator->old_solution = snapshot.old_solution.get();
+      simulator->old_old_solution = snapshot.old_old_solution.get();
+      simulator->current_linearization_point = snapshot.advection_linearization_point.get();
+      simulator->time = snapshot.time;
+      simulator->time_step = snapshot.time_step;
+      simulator->old_time_step = snapshot.old_time_step;
+      simulator->timestep_number = snapshot.timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        snapshot.pressure_normalization_adjustment;
+
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(this->introspection().base_elements.temperature).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_gradients |
+                              update_quadrature_points);
+
+      auto requested_density_cp_eta =
+        []()
+      {
+        return static_cast<MaterialModel::MaterialProperties::Property>(
+                 static_cast<int>(MaterialModel::MaterialProperties::density)
+                 | static_cast<int>(MaterialModel::MaterialProperties::specific_heat)
+                 | static_cast<int>(MaterialModel::MaterialProperties::viscosity));
+      };
+
+      enum class SeedCase
+      {
+        density,
+        specific_heat,
+        density_and_specific_heat,
+        viscosity,
+        density_and_viscosity
+      };
+
+      auto run_case = [&](const SeedCase seed_case)
+      {
+        // Each seed case chooses a different output covector bar(y). Testing
+        // combined seeds catches accumulation errors that single-property
+        // checks cannot reveal (for example overwriting rather than +=).
+        double local_adjoint_dot = 0.0;
+        double local_fd_dot = 0.0;
+        bool tested_cell = false;
+
+        for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+          if (cell->is_locally_owned())
+            {
+              if (tested_cell)
+                break;
+              tested_cell = true;
+
+              fe_values.reinit(cell);
+
+              MaterialModel::MaterialModelInputs<dim> in(fe_values,
+                                                         cell,
+                                                         this->introspection(),
+                                                         simulator->current_linearization_point);
+              MaterialModel::MaterialModelOutputs<dim> out(fe_values.n_quadrature_points,
+                                                           this->n_compositional_fields());
+              in.requested_properties = requested_density_cp_eta();
+              this->get_material_model().evaluate(in, out);
+
+              MaterialModelOutputAdjoints<dim> bar_out(fe_values.n_quadrature_points);
+              for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+                {
+                  if (seed_case == SeedCase::density
+                      || seed_case == SeedCase::density_and_specific_heat
+                      || seed_case == SeedCase::density_and_viscosity)
+                    bar_out.densities[q] =
+                      0.25 + 0.03 * static_cast<double>(q + 1);
+                  if (seed_case == SeedCase::specific_heat
+                      || seed_case == SeedCase::density_and_specific_heat)
+                    bar_out.specific_heat[q] =
+                      -0.4 + 0.02 * static_cast<double>(q + 1);
+                  if (seed_case == SeedCase::viscosity
+                      || seed_case == SeedCase::density_and_viscosity)
+                    bar_out.viscosities[q] =
+                      0.7 - 0.025 * static_cast<double>(q + 1);
+                }
+
+              MaterialModelInputAdjoints<dim> bar_in(fe_values.n_quadrature_points,
+                                                     this->n_compositional_fields());
+              const MaterialModelAdjoint<dim> material_model_adjoint(*simulator);
+              material_model_adjoint.apply_derivative_transpose(in,
+                                                                out,
+                                                                bar_out,
+                                                                bar_in);
+
+              // Construct one input direction delta_x and simultaneously form
+              // the adjoint contraction delta_x^T bar(x). The same direction
+              // perturbs the two material-model evaluations below.
+              MaterialModel::MaterialModelInputs<dim> in_plus = in;
+              MaterialModel::MaterialModelInputs<dim> in_minus = in;
+              // Contract the central output difference with the prescribed
+              // bar(y), producing the finite-difference side of the identity.
+              for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+                {
+                  const Point<dim> &point = fe_values.quadrature_point(q);
+                  const double temperature_direction =
+                    0.1 + 0.01 * static_cast<double>(q + 1) + 0.001 * point[0];
+                  local_adjoint_dot += temperature_direction * bar_in.temperature[q];
+                  in_plus.temperature[q] += epsilon * temperature_direction;
+                  in_minus.temperature[q] -= epsilon * temperature_direction;
+
+                  for (unsigned int c = 0; c < this->introspection().n_compositional_fields; ++c)
+                    {
+                      const double composition_direction =
+                        -0.2 + 0.015 * static_cast<double>(c + 1)
+                        + 0.004 * static_cast<double>(q + 1);
+                      local_adjoint_dot +=
+                        composition_direction * bar_in.composition[q][c];
+                      in_plus.composition[q][c] += epsilon * composition_direction;
+                      in_minus.composition[q][c] -= epsilon * composition_direction;
+                    }
+                }
+
+              MaterialModel::MaterialModelOutputs<dim> out_plus(fe_values.n_quadrature_points,
+                                                                this->n_compositional_fields());
+              MaterialModel::MaterialModelOutputs<dim> out_minus(fe_values.n_quadrature_points,
+                                                                 this->n_compositional_fields());
+              in_plus.requested_properties = requested_density_cp_eta();
+              in_minus.requested_properties = requested_density_cp_eta();
+              this->get_material_model().evaluate(in_plus, out_plus);
+              this->get_material_model().evaluate(in_minus, out_minus);
+
+              for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+                local_fd_dot +=
+                  bar_out.densities[q]
+                  * (out_plus.densities[q] - out_minus.densities[q])
+                  / (2.0 * epsilon)
+                  + bar_out.specific_heat[q]
+                  * (out_plus.specific_heat[q] - out_minus.specific_heat[q])
+                  / (2.0 * epsilon)
+                  + bar_out.viscosities[q]
+                  * (out_plus.viscosities[q] - out_minus.viscosities[q])
+                  / (2.0 * epsilon);
+            }
+
+        const double adjoint_dot =
+          Utilities::MPI::sum(local_adjoint_dot, this->get_mpi_communicator());
+        const double fd_dot =
+          Utilities::MPI::sum(local_fd_dot, this->get_mpi_communicator());
+        const double relative_error =
+          std::abs(adjoint_dot - fd_dot)
+          / std::max({std::abs(adjoint_dot), std::abs(fd_dot), 1e-30});
+
+        const std::string seed_label =
+          seed_case == SeedCase::density
+          ? "density"
+          : (seed_case == SeedCase::specific_heat
+             ? "specific heat"
+             : (seed_case == SeedCase::density_and_specific_heat
+                ? "density + specific heat"
+                : (seed_case == SeedCase::viscosity
+                   ? "viscosity"
+                   : "density + viscosity")));
+
+        this->get_pcout() << "   MaterialModelAdjoint "
+                          << material_model_name
+                          << " VJP diagnostic ("
+                          << seed_label
+                          << " seeds): FD = "
+                          << std::setprecision(16) << fd_dot
+                          << ", adjoint = " << adjoint_dot
+                          << ", relative error = " << relative_error
+                          << std::setprecision(6) << std::endl;
+
+        AssertThrow(relative_error < 1e-5,
+                    ExcMessage("The standalone MaterialModelAdjoint VJP diagnostic failed."));
+      };
+
+      run_case(SeedCase::density);
+      if (material_model_name == "adjoint material model")
+        run_case(SeedCase::specific_heat);
+      run_case(SeedCase::density_and_specific_heat);
+      if (material_model_name == "adjoint material model")
+        {
+          run_case(SeedCase::viscosity);
+          run_case(SeedCase::density_and_viscosity);
+        }
+
+      simulator->solution = saved_solution;
+      simulator->old_solution = saved_old_solution;
+      simulator->old_old_solution = saved_old_old_solution;
+      simulator->current_linearization_point = saved_linearization_point;
+      simulator->system_rhs = saved_system_rhs;
+      simulator->time = saved_time;
+      simulator->time_step = saved_time_step;
+      simulator->old_time_step = saved_old_time_step;
+      simulator->timestep_number = saved_timestep_number;
+      simulator->last_pressure_normalization_adjustment =
+        saved_pressure_normalization_adjustment;
+    }
+
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) template class Adjoint::Manager<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/diagnostics/manager_diagnostics.cc
+========================================================================================

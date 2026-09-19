@@ -81,10 +81,10 @@ subsection Postprocess
     set Output data in geographical coordinates = true
     set Density above = 0
     set Density below = 2.0
-    set Also output the spherical harmonic coefficients of geoid anomaly = false
-    set Also output the spherical harmonic coefficients of surface dynamic topography contribution = false
-    set Also output the spherical harmonic coefficients of CMB dynamic topography contribution = false
-    set Also output the spherical harmonic coefficients of density anomaly contribution = false
+    set Output geoid anomaly coefficients = false
+    set Output surface topography contribution coefficients = false
+    set Output CMB topography contribution coefficients = false
+    set Output density anomaly contribution coefficients = false
     set Include surface topography contribution = true
     set Include CMB topography contribution = true
   end

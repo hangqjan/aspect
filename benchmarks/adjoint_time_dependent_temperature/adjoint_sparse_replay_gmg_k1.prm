@@ -1,0 +1,19 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/trajectory_archive_benchmark.prm
+
+set Output directory = output-adjoint-sparse-replay-gmg-k1
+
+subsection Termination criteria
+  set End step = 6
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory anchor spacing = 1
+    set Trajectory cleanup policy = keep
+  end
+
+  subsection Diagnostics
+    set Run trajectory Stokes recovery diagnostic = false
+  end
+end

@@ -1,0 +1,3024 @@
+// Consolidated adjoint module: objective
+// Each section begins with its original repository path.
+
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/objective/composition_field_objective.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify it
+  under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful, but
+  WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+  General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE. If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_objective_composition_field_objective_h
+#define _aspect_adjoint_objective_composition_field_objective_h
+
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/parsed_function.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * Terminal composition-field objective for the transient adjoint
+     * workflow. The objective is
+     * 1/2 int w(x) (C_final(x)-C_obs(x))^2 dx for one compositional field.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class CompositionFieldObjective : public Objective::Interface<dim>,
+      public Objective::TerminalInterface<dim>
+    {
+      public:
+        CompositionFieldObjective ();
+
+        static
+        void
+        declare_parameters (ParameterHandler &prm);
+
+        void
+        parse_parameters (ParameterHandler &prm) override;
+
+        double
+        evaluate() const override;
+
+        void
+        assemble_terminal_advection_field_right_hand_side(
+          const AdvectionField &advection_field,
+          LinearAlgebra::BlockVector &right_hand_side) const override;
+
+      private:
+        double
+        target_composition (const Point<dim> &position) const;
+
+        double
+        weight (const Point<dim> &position) const;
+
+        Functions::ParsedFunction<dim> target_composition_function;
+        Functions::ParsedFunction<dim> weight_function;
+        Utilities::Coordinates::CoordinateSystem coordinate_system;
+        std::string field_name;
+        unsigned int compositional_index;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/objective/composition_field_objective.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/objective/dynamic_topography_objective.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_objective_dynamic_topography_objective_h
+#define _aspect_adjoint_objective_dynamic_topography_objective_h
+
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/parsed_function.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * A class that implements the instantaneous dynamic topography objective
+     * functional. It evaluates a surface dynamic topography misfit, assembles
+     * the corresponding top-boundary adjoint right hand side, and contributes
+     * direct density and viscosity kernel terms associated with the objective.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class DynamicTopographyObjective : public Objective::Interface<dim>,
+      public Objective::InstantaneousInterface<dim>
+    {
+      public:
+        /**
+         * Constructor.
+         */
+        DynamicTopographyObjective ();
+
+        /**
+         * Declare the parameters used by this objective functional.
+         */
+        static
+        void
+        declare_parameters (ParameterHandler &prm);
+
+        /**
+         * Read the parameters used by this objective functional.
+         */
+        void
+        parse_parameters (ParameterHandler &prm) override;
+
+        /**
+         * Evaluate one half of the squared surface dynamic topography misfit.
+         *
+         * @return The scalar value of the objective functional.
+         */
+        double
+        evaluate() const override;
+
+        /**
+         * Assemble the top-boundary adjoint right hand side associated with
+         * the dynamic topography objective.
+         *
+         * @param[in,out] rhs The adjoint right hand side vector to which this
+         * objective adds its contribution.
+         */
+        void
+        assemble_adjoint_right_hand_side(LinearAlgebra::BlockVector &right_hand_side) const override;
+
+        /**
+         * Add direct density and viscosity kernel terms associated with the
+         * dynamic topography objective.
+         *
+         * @param objective_name The objective functional name used to identify
+         * the contributions in @p kernels.
+         * @param[in,out] kernels The repository to which this objective adds
+         * direct kernel contributions.
+         */
+        void
+        add_direct_kernel_contributions(const std::string &objective_name,
+                                        KernelRepository<dim> &kernels) const override;
+
+        /**
+         * Return the forward postprocessors required by this objective.
+         *
+         * @return A set containing the dynamic topography postprocessor name.
+         */
+        std::set<std::string>
+        required_forward_postprocessors() const override;
+
+      private:
+        /**
+         * Assemble the dynamic-topography seed in the existing temperature
+         * support-point DoF representation. The two scalar outputs retain the
+         * quadrature-space contraction required by the mean-pressure
+         * transpose.
+         */
+        void
+        assemble_surface_topography_seed(LinearAlgebra::BlockVector &topography_adjoint,
+                                         double &top_area,
+                                         double &surface_pressure_weight) const;
+
+        /**
+         * Return the prescribed target dynamic topography at @p position.
+         */
+        double
+        target_topography (const Point<dim> &position) const;
+
+        /**
+         * The currently selected target topography model.
+         */
+        std::string target_topography_model;
+
+        /**
+         * A function object representing the target topography.
+         */
+        Functions::ParsedFunction<dim> target_topography_function;
+
+        /**
+         * The coordinate representation in which the target function is
+         * evaluated.
+         */
+        Utilities::Coordinates::CoordinateSystem target_coordinate_system;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/objective/dynamic_topography_objective.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/objective/geoid_objective.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_objective_geoid_objective_h
+#define _aspect_adjoint_objective_geoid_objective_h
+
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/postprocess/geoid_harmonics.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * A coefficient-space geoid objective for the non-self-gravitating
+     * mantle-density, surface-dynamic-topography, and CMB-dynamic-topography
+     * contributions. The topography branches contribute to one shared
+     * physical Stokes adjoint; the mantle-density branch is a direct
+     * observation-operator transpose.
+     */
+    template <int dim>
+    class GeoidObjective : public Objective::Interface<dim>,
+      public Objective::InstantaneousInterface<dim>
+    {
+      public:
+        static
+        void
+        declare_parameters (ParameterHandler &prm);
+
+        void
+        parse_parameters (ParameterHandler &prm) override;
+
+        double
+        evaluate() const override;
+
+        /** Assemble all enabled dynamic-topography contributions to the physical Stokes adjoint. */
+        void
+        assemble_adjoint_right_hand_side(LinearAlgebra::BlockVector &right_hand_side) const override;
+
+        bool
+        requires_physical_stokes_adjoint() const override;
+
+        std::set<std::string>
+        required_forward_postprocessors() const override;
+
+        void
+        add_direct_kernel_contributions(const std::string &objective_name,
+                                        KernelRepository<dim> &kernels) const override;
+
+      private:
+        /** Return the spherical-shell radius and the surface gravity magnitude. */
+        std::pair<double, double>
+        operator_context() const;
+
+        Postprocess::SphericalHarmonicCoefficients
+        forward_coefficients() const;
+
+        /** Assemble the G0-compatible seed for the surface topography branch. */
+        void
+        assemble_surface_topography_seed(LinearAlgebra::BlockVector &topography_adjoint,
+                                         double &top_area,
+                                         double &surface_pressure_weight) const;
+
+        /** Assemble the G0-compatible seed for the CMB topography branch. */
+        void
+        assemble_cmb_topography_seed(LinearAlgebra::BlockVector &topography_adjoint,
+                                     double &bottom_area,
+                                     double &bottom_pressure_weight) const;
+
+        /** Construct q_N=W(N-N_obs) in the shared coefficient layout. */
+        Postprocess::SphericalHarmonicCoefficients
+        coefficient_seed() const;
+
+        unsigned int minimum_degree;
+        unsigned int maximum_degree;
+        Postprocess::SphericalHarmonicCoefficients observed_coefficients;
+        /** One nonnegative diagonal weight per degree/order, shared by cos/sin. */
+        std::vector<double> weights;
+        bool include_surface_topography;
+        bool include_cmb_topography;
+        double density_above;
+        double density_below;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/objective/geoid_objective.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/objective/objective_functional.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_objective_objective_functional_h
+#define _aspect_adjoint_objective_objective_functional_h
+
+#include <aspect/advection_field.h>
+#include <aspect/adjoint/core/state.h>
+#include <aspect/plugins.h>
+#include <aspect/simulator_access.h>
+
+#include <memory>
+#include <set>
+#include <string>
+
+namespace aspect
+{
+  /**
+   * A namespace for everything to do with adjoint methods.
+   *
+   * @ingroup Adjoint
+   */
+  namespace Adjoint
+  {
+    template <int dim> class KernelRepository;
+
+    namespace Objective
+    {
+
+      /**
+       * A base class for adjoint objective functionals. Implementations
+       * evaluate an objective, assemble its contribution to the adjoint right
+       * hand side, and may add direct physical-property kernel contributions.
+       *
+       * @ingroup Adjoint
+       */
+      template <int dim>
+      class Interface : public Plugins::InterfaceBase,
+        public SimulatorAccess<dim>
+      {
+        public:
+          /**
+           * Destructor.
+           */
+          virtual
+          ~Interface() override = default;
+
+          /**
+           * Evaluate the objective functional for the current forward solution.
+           *
+           * @return The scalar value of the objective functional.
+           */
+          virtual
+          double
+          evaluate() const = 0;
+
+          /**
+           * Return the names of forward postprocessors that must be executed
+           * before this objective functional is evaluated or assembled. The
+           * names are the same strings used in parameter files. The default
+           * implementation returns an empty set.
+           *
+           * @return A set of required forward postprocessor names.
+           */
+          virtual
+          std::set<std::string>
+          required_forward_postprocessors() const;
+      };
+
+      /** Capability implemented by objectives of the current Stokes state. */
+      template <int dim>
+      class InstantaneousInterface
+      {
+        public:
+          virtual ~InstantaneousInterface() = default;
+
+          virtual void
+          assemble_adjoint_right_hand_side(LinearAlgebra::BlockVector &right_hand_side) const = 0;
+
+          virtual void
+          add_direct_kernel_contributions(const std::string &objective_name,
+                                          KernelRepository<dim> &kernels) const = 0;
+
+          virtual bool
+          requires_physical_stokes_adjoint() const
+          {
+            return true;
+          }
+      };
+
+      /** Capability implemented by objectives defined on the terminal state. */
+      template <int dim>
+      class TerminalInterface
+      {
+        public:
+          virtual ~TerminalInterface() = default;
+
+          virtual void
+          assemble_terminal_advection_field_right_hand_side(
+            const AdvectionField &advection_field,
+            LinearAlgebra::BlockVector &right_hand_side) const = 0;
+      };
+
+      /**
+       * Optional mixin for objective plugins that contribute at intermediate
+       * Stokes states. Keeping this capability separate lets the manager opt in
+       * without adding default no-op methods to the common objective interface.
+       */
+      template <int dim>
+      class RunningStokesInterface
+      {
+        public:
+          virtual ~RunningStokesInterface() = default;
+
+          virtual double
+          evaluate_running_stokes_objective(const unsigned int timestep) const = 0;
+
+          virtual void
+          assemble_running_stokes_adjoint_rhs(const unsigned int timestep,
+                                              LinearAlgebra::BlockVector &rhs) const = 0;
+      };
+
+
+
+      /**
+       * A class that manages all active adjoint objective functionals. It reads
+       * the list of selected objectives from the parameter file and creates the
+       * corresponding objective plugins. It also provides functions that call
+       * all active objective plugins to collect required postprocessors,
+       * assemble objective right hand sides, and add direct kernel
+       * contributions.
+       *
+       * @ingroup Adjoint
+       */
+      template <int dim>
+      class Manager : public Plugins::ManagerBase<Interface<dim>>,
+        public SimulatorAccess<dim>
+      {
+        public:
+          /**
+           * Register an adjoint objective functional so that it can be selected
+           * from the parameter file. This allows objective implementations to
+           * register themselves without modifying the manager whenever a new
+           * objective functional is added.
+           *
+           * @param name A string that identifies the objective functional.
+           * @param description A text description of what this objective
+           * functional does and that will be listed in the documentation of the
+           * parameter file.
+           * @param declare_parameters_function A pointer to a function that can
+           * be used to declare the parameters that this objective functional
+           * wants to read from input files.
+           * @param factory_function A pointer to a function that can create an
+           * object of this objective functional.
+           */
+          static
+          void
+          register_objective_functional(const std::string &name,
+                                        const std::string &description,
+                                        void (*declare_parameters_function) (ParameterHandler &),
+                                        std::unique_ptr<Interface<dim>> (*factory_function) ());
+
+          /**
+           * Declare the parameters used by the objective manager and all
+           * registered objective functional plugins.
+           *
+           * @param prm The parameter handler in which parameters are declared.
+           */
+          static
+          void
+          declare_parameters (ParameterHandler &prm);
+
+          /**
+           * Read the list of objective functionals from the parameter file and
+           * create the corresponding objective plugin objects.
+           *
+           * @param prm The parameter handler from which the objective list is
+           * read.
+           */
+          void
+          parse_parameters(ParameterHandler &prm) override;
+
+          /**
+           * Return the names of all forward postprocessors required by active
+           * objective functionals.
+           *
+           * @return A set of required forward postprocessor names.
+           */
+          std::set<std::string>
+          required_forward_postprocessors() const;
+
+          /**
+           * Evaluate all active objective functionals for the current forward
+           * solution and assemble their adjoint right hand side contributions.
+           *
+           * @return Objective values and right hand sides for all active
+           * objective functionals.
+           */
+          std::vector<std::unique_ptr<ObjectiveResult>>
+          evaluate_and_assemble_right_hand_sides() const;
+
+          /**
+           * Evaluate all active objective functionals and assemble their
+           * terminal-temperature adjoint seed into a single right hand side.
+           *
+           * @param[in,out] right_hand_side The full-system vector that receives
+           * the terminal temperature seed.
+           *
+           * @return A map from objective functional names to objective values.
+           */
+          std::map<std::string, double>
+          evaluate_and_assemble_terminal_temperature_right_hand_side(
+            LinearAlgebra::BlockVector &right_hand_side) const;
+
+          /**
+           * Evaluate all active objective functionals and assemble their
+           * terminal adjoint seed for one advected field into a single right hand
+           * side.
+           *
+           * @param advection_field The advected field whose terminal seed is
+           * requested.
+           * @param[in,out] right_hand_side The full-system vector that receives
+           * the seed.
+           *
+           * @return A map from objective functional names to objective values.
+           */
+          std::map<std::string, double>
+          evaluate_and_assemble_terminal_advection_field_right_hand_side(
+            const AdvectionField &advection_field,
+            LinearAlgebra::BlockVector &right_hand_side) const;
+
+          /** Evaluate all time-distributed Stokes objective contributions. */
+          std::map<std::string, double>
+          evaluate_running_stokes_objectives(const unsigned int timestep) const;
+
+          /** Assemble all time-distributed Stokes-adjoint seed contributions. */
+          void
+          assemble_running_stokes_adjoint_right_hand_side(
+            const unsigned int timestep,
+            LinearAlgebra::BlockVector &right_hand_side) const;
+
+
+          /**
+           * Add direct physical-property kernel contributions from all active
+           * objective functionals for the current forward solution.
+           *
+           * @param[in,out] kernels The repository to which active objectives add
+           * direct kernel contributions.
+           */
+          void
+          add_direct_kernel_contributions(KernelRepository<dim> &kernels) const;
+      };
+
+    }
+
+
+
+#define ASPECT_REGISTER_ADJOINT_OBJECTIVE(classname, name, description) \
+  template class classname<2>; \
+  template class classname<3>; \
+  namespace ASPECT_REGISTER_ADJOINT_OBJECTIVE_ ## classname \
+  { \
+    aspect::internal::Plugins::RegisterHelper<aspect::Adjoint::Objective::Interface<2>,classname<2>> \
+    dummy_ ## classname ## _2d (&aspect::Adjoint::Objective::Manager<2>::register_objective_functional, \
+                                name, description); \
+    aspect::internal::Plugins::RegisterHelper<aspect::Adjoint::Objective::Interface<3>,classname<3>> \
+    dummy_ ## classname ## _3d (&aspect::Adjoint::Objective::Manager<3>::register_objective_functional, \
+                                name, description); \
+  }
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/objective/objective_functional.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/objective/self_gravitating_geoid_objective.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+*/
+
+#ifndef _aspect_adjoint_objective_self_gravitating_geoid_objective_h
+#define _aspect_adjoint_objective_self_gravitating_geoid_objective_h
+
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/postprocess/self_gravitating_geoid_operator.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * Coupled self-gravitating geoid objective. It propagates spectral seeds
+     * through CBF and volume-density transposes, and chains the boundary-mean
+     * raw-density dependence of the 4-by-4 coefficient matrix.
+     */
+    template <int dim>
+    class SelfGravitatingGeoidObjective : public Objective::Interface<dim>,
+      public Objective::InstantaneousInterface<dim>
+    {
+      public:
+        static void declare_parameters(ParameterHandler &prm);
+        void parse_parameters(ParameterHandler &prm) override;
+        double evaluate() const override;
+        void assemble_adjoint_right_hand_side(LinearAlgebra::BlockVector &right_hand_side) const override;
+        bool requires_physical_stokes_adjoint() const override;
+        std::set<std::string> required_forward_postprocessors() const override;
+        void add_direct_kernel_contributions(const std::string &objective_name,
+                                             KernelRepository<dim> &kernels) const override;
+
+      private:
+        Postprocess::SelfGravitatingGeoidOperatorInputs inputs() const;
+        Postprocess::SelfGravitatingGeoidCoefficients forward_coefficients() const;
+        Postprocess::SelfGravitatingGeoidCoefficients coefficient_seed() const;
+        bool has_traction_seed(const Postprocess::SelfGravitatingGeoidRHSSeeds &seeds) const;
+
+        unsigned int minimum_degree = 2;
+        unsigned int maximum_degree = 2;
+        std::array<Postprocess::SphericalHarmonicCoefficients, 4> observed_coefficients;
+        std::vector<double> weights;
+        double density_above = 0.0;
+        double density_below = 9900.0;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/objective/self_gravitating_geoid_objective.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: include/aspect/adjoint/objective/temperature_field_objective.h
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#ifndef _aspect_adjoint_objective_temperature_field_objective_h
+#define _aspect_adjoint_objective_temperature_field_objective_h
+
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/parsed_function.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    /**
+     * Terminal temperature-field objective for the transient adjoint
+     * workflow. The objective is
+     * 1/2 int w(x) (T_final(x)-T_obs(x))^2 dx.
+     *
+     * @ingroup Adjoint
+     */
+    template <int dim>
+    class TemperatureFieldObjective : public Objective::Interface<dim>,
+      public Objective::TerminalInterface<dim>
+    {
+      public:
+        TemperatureFieldObjective ();
+
+        static
+        void
+        declare_parameters (ParameterHandler &prm);
+
+        void
+        parse_parameters (ParameterHandler &prm) override;
+
+        double
+        evaluate() const override;
+
+        void
+        assemble_terminal_advection_field_right_hand_side(
+          const AdvectionField &advection_field,
+          LinearAlgebra::BlockVector &right_hand_side) const override;
+
+        /** Use a copied terminal state as the temperature observation. */
+        void
+        set_discrete_terminal_observation(const LinearAlgebra::BlockVector &observation);
+
+        void
+        clear_discrete_terminal_observation();
+
+      private:
+        double
+        target_temperature (const Point<dim> &position) const;
+
+        double
+        weight (const Point<dim> &position) const;
+
+        Functions::ParsedFunction<dim> target_temperature_function;
+        Functions::ParsedFunction<dim> weight_function;
+        Utilities::Coordinates::CoordinateSystem coordinate_system;
+        std::unique_ptr<LinearAlgebra::BlockVector> discrete_terminal_observation;
+    };
+  }
+}
+
+#endif
+
+========================================================================================
+// END FILE: include/aspect/adjoint/objective/temperature_field_objective.h
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/objective/composition_field_objective.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify it
+  under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful, but
+  WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+  General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE. If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/objective/composition_field_objective.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/geometry_model/interface.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    CompositionFieldObjective<dim>::CompositionFieldObjective ()
+      :
+      target_composition_function(1),
+      weight_function(1),
+      coordinate_system(Utilities::Coordinates::cartesian),
+      field_name(""),
+      compositional_index(numbers::invalid_unsigned_int)
+    {}
+
+
+
+    template <int dim>
+    double
+    CompositionFieldObjective<dim>::target_composition(const Point<dim> &position) const
+    {
+      const Utilities::NaturalCoordinate<dim> point =
+        this->get_geometry_model().cartesian_to_other_coordinates(position,
+                                                                  coordinate_system);
+      return target_composition_function.value(
+               Utilities::convert_array_to_point<dim>(point.get_coordinates()));
+    }
+
+
+
+    template <int dim>
+    double
+    CompositionFieldObjective<dim>::weight(const Point<dim> &position) const
+    {
+      const Utilities::NaturalCoordinate<dim> point =
+        this->get_geometry_model().cartesian_to_other_coordinates(position,
+                                                                  coordinate_system);
+      return weight_function.value(
+               Utilities::convert_array_to_point<dim>(point.get_coordinates()));
+    }
+
+
+
+    template <int dim>
+    double
+    CompositionFieldObjective<dim>::evaluate() const
+    {
+      const AdvectionField advection_field = AdvectionField::composition(compositional_index);
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(advection_field.base_element(this->introspection())).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_quadrature_points |
+                              update_JxW_values);
+
+      std::vector<double> composition_values(quadrature_formula.size());
+      double local_objective = 0.0;
+
+      // Evaluate
+      //   Phi(C_N)=1/2 integral_Omega w(x)[C_N(x)-C_obs(x)]^2 dx
+      // for the one named compositional component. Other components share the
+      // mixed FE vector but are absent from this functional. MPI sum assembles
+      // the scalar integral over the distributed locally owned cells.
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[advection_field.scalar_extractor(this->introspection())]
+            .get_function_values(this->get_solution(),
+                                 composition_values);
+
+            for (unsigned int q = 0; q < quadrature_formula.size(); ++q)
+              {
+                const Point<dim> &position = fe_values.quadrature_point(q);
+                const double residual = composition_values[q] - target_composition(position);
+                local_objective += 0.5 * weight(position) * residual * residual * fe_values.JxW(q);
+              }
+          }
+
+      return Utilities::MPI::sum(local_objective, this->get_mpi_communicator());
+    }
+
+
+
+    template <int dim>
+    void
+    CompositionFieldObjective<dim>::assemble_terminal_advection_field_right_hand_side(
+      const AdvectionField &advection_field,
+      LinearAlgebra::BlockVector &rhs) const
+    {
+      if (advection_field.is_temperature()
+          || advection_field.compositional_variable != compositional_index)
+        return;
+
+      // Terminal composition objectives seed only the requested composition
+      // field at the final accepted time. The reverse sweep later propagates
+      // this seed through that field's advection equation and through any
+      // temperature/Stokes material dependencies that involve composition.
+      // For basis function phi_i of this component, the discrete covector is
+      //
+      //   b_i=int_Omega w(C_N-C_obs) phi_i dx.
+      //
+      // It is assembled directly in the mixed global layout so it can enter
+      // the same fixed three-level reverse history as temperature.
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(advection_field.base_element(this->introspection())).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      const unsigned int composition_component =
+        advection_field.component_index(this->introspection());
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_quadrature_points |
+                              update_JxW_values);
+
+      Vector<double> local_rhs(dofs_per_cell);
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+      std::vector<double> composition_values(quadrature_formula.size());
+      const FEValuesExtractors::Scalar composition_extractor =
+        advection_field.scalar_extractor(this->introspection());
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[composition_extractor].get_function_values(this->get_solution(),
+                                                                 composition_values);
+
+            local_rhs = 0.0;
+            cell->get_dof_indices(local_dof_indices);
+
+            for (unsigned int q = 0; q < quadrature_formula.size(); ++q)
+              {
+                const Point<dim> &position = fe_values.quadrature_point(q);
+                const double seed =
+                  weight(position) * (composition_values[q] - target_composition(position));
+
+                // Restrict the FE transpose to the selected composition
+                // component; scalar basis functions belonging to temperature
+                // or another composition must receive exactly zero seed.
+                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                  if (this->get_fe().system_to_component_index(i).first == composition_component)
+                    local_rhs(i) += seed
+                                    * fe_values[composition_extractor].value(i, q)
+                                    * fe_values.JxW(q);
+              }
+
+            this->get_current_constraints().distribute_local_to_global(local_rhs,
+                                                                       local_dof_indices,
+                                                                       rhs);
+          }
+    }
+
+
+
+    template <int dim>
+    void
+    CompositionFieldObjective<dim>::declare_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection ("Adjoint");
+      {
+        prm.enter_subsection ("Composition field");
+        {
+          prm.declare_entry ("Field name", "",
+                             Patterns::Anything(),
+                             "Name of the compositional field used by the terminal "
+                             "composition misfit objective.");
+
+          prm.declare_entry ("Coordinate system", "cartesian",
+                             Patterns::Selection ("cartesian|spherical|depth"),
+                             "Coordinate system used to evaluate the terminal composition "
+                             "target and weight functions.");
+
+          prm.enter_subsection ("Target function");
+          {
+            Functions::ParsedFunction<dim>::declare_parameters (prm, 1);
+            prm.declare_entry ("Function expression", "0",
+                               Patterns::Anything(),
+                               "Target final composition field.");
+          }
+          prm.leave_subsection();
+
+          prm.enter_subsection ("Weight function");
+          {
+            Functions::ParsedFunction<dim>::declare_parameters (prm, 1);
+            prm.declare_entry ("Function expression", "1",
+                               Patterns::Anything(),
+                               "Non-negative spatial weight for the terminal composition misfit.");
+          }
+          prm.leave_subsection();
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    void
+    CompositionFieldObjective<dim>::parse_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection ("Adjoint");
+      {
+        prm.enter_subsection ("Composition field");
+        {
+          field_name = prm.get ("Field name");
+          AssertThrow(field_name.empty() == false,
+                      ExcMessage("Adjoint/Composition field/Field name must name one compositional field."));
+          compositional_index = this->introspection().compositional_index_for_name(field_name);
+
+          coordinate_system =
+            Utilities::Coordinates::string_to_coordinate_system(prm.get ("Coordinate system"));
+
+          prm.enter_subsection ("Target function");
+          {
+            try
+              {
+                target_composition_function.parse_parameters(prm);
+              }
+            catch (...)
+              {
+                std::cerr << "ERROR: FunctionParser failed to parse\n"
+                          << "\t'Adjoint.Composition field.Target function'\n"
+                          << "with expression\n"
+                          << "\t'" << prm.get ("Function expression") << "'"
+                          << "More information about the cause of the parse error \n"
+                          << "is shown below.\n";
+                throw;
+              }
+          }
+          prm.leave_subsection();
+
+          prm.enter_subsection ("Weight function");
+          {
+            try
+              {
+                weight_function.parse_parameters(prm);
+              }
+            catch (...)
+              {
+                std::cerr << "ERROR: FunctionParser failed to parse\n"
+                          << "\t'Adjoint.Composition field.Weight function'\n"
+                          << "with expression\n"
+                          << "\t'" << prm.get ("Function expression") << "'"
+                          << "More information about the cause of the parse error \n"
+                          << "is shown below.\n";
+                throw;
+              }
+          }
+          prm.leave_subsection();
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    ASPECT_REGISTER_ADJOINT_OBJECTIVE(CompositionFieldObjective,
+                                      "composition field",
+                                      "Terminal composition-field misfit objective for "
+                                      "the time-dependent temperature adjoint workflow.")
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/objective/composition_field_objective.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/objective/dynamic_topography_objective.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/objective/dynamic_topography_objective.h>
+#include <aspect/adjoint/operators/dynamic_topography_boundary_operator.h>
+#include <aspect/geometry_model/interface.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/simulator.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <cmath>
+#include <limits>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    DynamicTopographyObjective<dim>::DynamicTopographyObjective ()
+      : target_topography_model ("none"),
+        target_topography_function (1),
+        target_coordinate_system (Utilities::Coordinates::spherical)
+    {}
+
+    template <int dim>
+    double DynamicTopographyObjective<dim>::target_topography (const Point<dim> &position) const
+    {
+      if (target_topography_model == "function")
+        {
+          const Utilities::NaturalCoordinate<dim> point =
+            this->get_geometry_model().cartesian_to_other_coordinates(position, target_coordinate_system);
+          return target_topography_function.value(
+                   Utilities::convert_array_to_point<dim>(point.get_coordinates()));
+        }
+      AssertThrow(false, ExcMessage("Dynamic topography objective requires a target topography model. "
+                                    "Set Adjoint/Dynamic topography/Target topography model."));
+      return 0.0;
+    }
+
+    template <int dim>
+    std::set<std::string> DynamicTopographyObjective<dim>::required_forward_postprocessors() const
+    {
+      return {"dynamic topography"};
+    }
+
+    template <int dim>
+    double DynamicTopographyObjective<dim>::evaluate() const
+    {
+      const auto &dynamic_topography = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+      AssertThrow(dynamic_topography.topography_vector().size() != 0,
+                  ExcMessage("DynamicTopographyObjective requires the dynamic topography "
+                             "postprocessor to have run before objective evaluation."));
+      const types::boundary_id top_boundary_id =
+        this->get_geometry_model().translate_symbolic_boundary_name_to_id("top");
+      const unsigned int quadrature_degree = this->get_fe().base_element(
+                                               this->introspection().base_elements.velocities).degree + 1;
+      const QGauss<dim-1> quadrature_formula_face(quadrature_degree);
+      FEFaceValues<dim> fe_face_values(this->get_mapping(), this->get_fe(), quadrature_formula_face,
+                                       update_values | update_quadrature_points | update_JxW_values);
+      double local_objective = 0.0;
+      std::vector<double> topo_values(quadrature_formula_face.size());
+
+      // Evaluate the boundary L2 misfit
+      //   J(h)=1/2 integral_Gamma_top [h(x)-h_obs(x)]^2 dA.
+      // Only locally owned faces contribute, so the final MPI sum is the
+      // distributed assembly of this scalar surface integral.
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          for (const unsigned int f : cell->face_indices())
+            if (cell->at_boundary(f) && cell->face(f)->boundary_id() == top_boundary_id)
+              {
+                fe_face_values.reinit(cell, f);
+                fe_face_values[this->introspection().extractors.temperature].get_function_values(
+                  dynamic_topography.topography_vector(), topo_values);
+                for (unsigned int q = 0; q < quadrature_formula_face.size(); ++q)
+                  {
+                    const double residual = topo_values[q] - target_topography(fe_face_values.quadrature_point(q));
+                    local_objective += 0.5 * residual * residual * fe_face_values.JxW(q);
+                  }
+              }
+      return Utilities::MPI::sum(local_objective, this->get_mpi_communicator());
+    }
+
+    template <int dim>
+    void DynamicTopographyObjective<dim>::assemble_surface_topography_seed(
+      LinearAlgebra::BlockVector &topography_adjoint, double &top_area,
+      double &surface_pressure_weight) const
+    {
+      const auto &dynamic_topography = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+      AssertThrow(dynamic_topography.topography_vector().size() != 0,
+                  ExcMessage("DynamicTopographyObjective requires the dynamic topography "
+                             "postprocessor to have run before assembling the adjoint RHS."));
+      const types::boundary_id top_boundary_id =
+        this->get_geometry_model().translate_symbolic_boundary_name_to_id("top");
+      const unsigned int quadrature_degree = this->get_fe().base_element(
+                                               this->introspection().base_elements.velocities).degree + 1;
+      const QGauss<dim-1> quadrature_formula_face(quadrature_degree);
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      FEFaceValues<dim> fe_face_values(this->get_mapping(), this->get_fe(), quadrature_formula_face,
+                                       update_values | update_gradients | update_quadrature_points |
+                                       update_normal_vectors | update_JxW_values);
+      Vector<double> local_topography_adjoint(dofs_per_cell);
+      std::vector<double> topo_values(quadrature_formula_face.size());
+      topography_adjoint = 0.0;
+      top_area = 0.0;
+      surface_pressure_weight = 0.0;
+
+      // The functional derivative with respect to the CBF topography is
+      // bar(h)=h-h_obs. Its FE dual vector has entries
+      //   b_i^h=int_Gamma bar(h) phi_i dA.
+      //
+      // CBF computes h from reduced normal stress divided by
+      // Delta_rho |g|. The scalar pressure_weight accumulated here is the
+      // companion seed required to transpose the mean-pressure correction in
+      // the shared boundary operator. It uses the same quadrature density and
+      // gravity values as the forward CBF evaluation.
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          for (const unsigned int f : cell->face_indices())
+            if (cell->at_boundary(f) && cell->face(f)->boundary_id() == top_boundary_id)
+              {
+                fe_face_values.reinit(cell, f);
+                local_topography_adjoint = 0.0;
+                MaterialModel::MaterialModelInputs<dim> in(fe_face_values, cell,
+                                                           this->introspection(), this->get_solution());
+                MaterialModel::MaterialModelOutputs<dim> out(fe_face_values.n_quadrature_points,
+                                                             this->n_compositional_fields());
+                in.requested_properties = MaterialModel::MaterialProperties::density;
+                this->get_material_model().evaluate(in, out);
+                fe_face_values[this->introspection().extractors.temperature].get_function_values(
+                  dynamic_topography.topography_vector(), topo_values);
+                for (unsigned int q = 0; q < quadrature_formula_face.size(); ++q)
+                  {
+                    const Tensor<1,dim> gravity = this->get_gravity_model().gravity_vector(
+                                                    fe_face_values.quadrature_point(q));
+                    const double gravity_norm = gravity.norm();
+                    const double density_contrast = out.densities[q] - dynamic_topography.get_density_above();
+                    AssertThrow(std::abs(density_contrast) > std::numeric_limits<double>::min(),
+                                ExcMessage("DynamicTopographyObjective encountered zero density contrast at the top boundary."));
+                    AssertThrow(gravity_norm > std::numeric_limits<double>::min(),
+                                ExcMessage("DynamicTopographyObjective encountered zero gravity magnitude at the top boundary."));
+                    top_area += fe_face_values.JxW(q);
+                    const double residual = topo_values[q] - target_topography(fe_face_values.quadrature_point(q));
+                    surface_pressure_weight += residual / (density_contrast * gravity_norm) * fe_face_values.JxW(q);
+                    for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                      local_topography_adjoint(i) += residual *
+                                                     fe_face_values[this->introspection().extractors.temperature].value(i, q) *
+                                                     fe_face_values.JxW(q);
+                  }
+                // This vector represents a boundary functional, not a primal
+                // field interpolation. Direct local-to-global addition is
+                // therefore followed by compress(add) across MPI ranks.
+                cell->distribute_local_to_global(local_topography_adjoint, topography_adjoint);
+              }
+      topography_adjoint.compress(VectorOperation::add);
+      top_area = Utilities::MPI::sum(top_area, this->get_mpi_communicator());
+      surface_pressure_weight = Utilities::MPI::sum(surface_pressure_weight, this->get_mpi_communicator());
+      AssertThrow(top_area > std::numeric_limits<double>::min(),
+                  ExcMessage("DynamicTopographyObjective found zero top boundary area."));
+    }
+
+    template <int dim>
+    void DynamicTopographyObjective<dim>::assemble_adjoint_right_hand_side(
+      LinearAlgebra::BlockVector &rhs) const
+    {
+      const auto &dynamic_topography = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+      LinearAlgebra::BlockVector topography_adjoint(this->introspection().index_sets.system_partitioning,
+                                                    this->introspection().index_sets.system_relevant_partitioning,
+                                                    this->get_mpi_communicator());
+      double top_area = 0.0, surface_pressure_weight = 0.0;
+      assemble_surface_topography_seed(topography_adjoint, top_area, surface_pressure_weight);
+
+      // Apply (partial h/partial [u,p])^T bar(h). This contributes only the
+      // state-dependent path of the objective; density and viscosity
+      // derivatives of the same CBF expression are handled as direct kernels
+      // below to avoid mixing state and parameter derivatives.
+      DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_state_transpose(
+        topography_adjoint, top_area, surface_pressure_weight,
+        dynamic_topography.get_density_above(), rhs,
+        Postprocess::DynamicTopographyBoundary::surface);
+    }
+
+    template <int dim>
+    void DynamicTopographyObjective<dim>::add_direct_kernel_contributions(
+      const std::string &objective_name, KernelRepository<dim> &kernels) const
+    {
+      const auto &dynamic_topography = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+      LinearAlgebra::BlockVector topography_adjoint(this->introspection().index_sets.system_partitioning,
+                                                    this->introspection().index_sets.system_relevant_partitioning,
+                                                    this->get_mpi_communicator());
+      double top_area = 0.0, surface_pressure_weight = 0.0;
+      assemble_surface_topography_seed(topography_adjoint, top_area, surface_pressure_weight);
+
+      // Holding the Stokes solution fixed, transpose h=sigma_nn/(Delta_rho|g|)
+      // through Delta_rho and the viscosity-dependent reduced stress. These
+      // terms complement the implicit-state kernel produced by the Stokes
+      // adjoint and are stored under the same objective name.
+      DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_direct_kernel_contributions(
+        topography_adjoint, dynamic_topography.topography_vector(), dynamic_topography.get_density_above(),
+        objective_name, kernels, Postprocess::DynamicTopographyBoundary::surface);
+    }
+
+    template <int dim>
+    void DynamicTopographyObjective<dim>::declare_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection ("Adjoint");
+      {
+        prm.enter_subsection ("Dynamic topography");
+        {
+          prm.declare_entry ("Target topography model", "none", Patterns::Selection ("none|function"),
+                             "The model used to prescribe the target dynamic topography. The dynamic topography "
+                             "objective evaluates one half of the squared misfit between the computed and target "
+                             "topography. A target topography model is required when this objective is used.");
+          prm.enter_subsection ("Function");
+          {
+            prm.declare_entry ("Coordinate system", "spherical", Patterns::Selection ("cartesian|spherical|depth"),
+                               "A selection that determines the assumed coordinate system for the target function "
+                               "variables. Allowed values are `cartesian', `spherical', and `depth'. `spherical' "
+                               "coordinates are interpreted as r,phi or r,phi,theta in 2d/3d respectively with theta "
+                               "being the polar angle.");
+            Functions::ParsedFunction<dim>::declare_parameters (prm, 1);
+            prm.declare_entry ("Variable names", dim == 2 ? "r,phi" : "r,phi,theta", Patterns::Anything(),
+                               "Names of the coordinates used in the target topography function.");
+            prm.declare_entry ("Function expression", "", Patterns::Anything(), "Target dynamic topography in meters.");
+          }
+          prm.leave_subsection();
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+    template <int dim>
+    void DynamicTopographyObjective<dim>::parse_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection ("Adjoint");
+      {
+        prm.enter_subsection ("Dynamic topography");
+        {
+          target_topography_model = prm.get ("Target topography model");
+          AssertThrow(target_topography_model != "none",
+                      ExcMessage("Dynamic topography objective requires a target topography model. "
+                                 "Set Adjoint/Dynamic topography/Target topography model."));
+          if (target_topography_model == "function")
+            {
+              prm.enter_subsection ("Function");
+              {
+                target_coordinate_system = Utilities::Coordinates::string_to_coordinate_system(
+                                             prm.get ("Coordinate system"));
+              }
+              try
+                {
+                  target_topography_function.parse_parameters (prm);
+                }
+              catch (...)
+                {
+                  std::cerr << "ERROR: FunctionParser failed to parse\n\t'Adjoint.Dynamic topography.Function'\n"
+                            << "with expression\n\t'" << prm.get ("Function expression") << "'"
+                            << "More information about the cause of the parse error \n"
+                            << "is shown below.\n";
+                  throw;
+                }
+              prm.leave_subsection();
+            }
+          else
+            AssertThrow (false, ExcNotImplemented());
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+  }
+}
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    ASPECT_REGISTER_ADJOINT_OBJECTIVE(DynamicTopographyObjective,
+                                      "dynamic topography",
+                                      "Objective functional for instantaneous dynamic-topography inversion. The objective "
+                                      "evaluates one half of the squared surface dynamic topography misfit and assembles the "
+                                      "corresponding top-boundary adjoint right hand side.")
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/objective/dynamic_topography_objective.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/objective/geoid_objective.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/objective/geoid_objective.h>
+#include <aspect/adjoint/operators/dynamic_topography_boundary_operator.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/geometry_model/spherical_shell.h>
+#include <aspect/gravity_model/interface.h>
+#include <aspect/postprocess/boundary_densities.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/simulator.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <cmath>
+#include <limits>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    std::pair<double, double>
+    GeoidObjective<dim>::operator_context() const
+    {
+      AssertThrow(dim == 3,
+                  ExcMessage("The non-self-gravitating geoid objective currently only works in 3D."));
+      const auto *geometry_model = dynamic_cast<const GeometryModel::SphericalShell<dim> *>(
+                                     &this->get_geometry_model());
+      AssertThrow(geometry_model != nullptr,
+                  ExcMessage("The non-self-gravitating geoid objective requires a spherical shell geometry model."));
+      const double outer_radius = geometry_model->outer_radius();
+      Point<dim> surface_point;
+      surface_point[0] = outer_radius;
+      const double surface_gravity =
+        this->get_gravity_model().gravity_vector(surface_point).norm();
+      AssertThrow(surface_gravity > std::numeric_limits<double>::min(),
+                  ExcMessage("The non-self-gravitating geoid objective requires nonzero surface gravity."));
+      return {outer_radius, surface_gravity};
+    }
+
+
+
+    template <int dim>
+    Postprocess::SphericalHarmonicCoefficients
+    GeoidObjective<dim>::forward_coefficients() const
+    {
+      const std::pair<double, double> context = operator_context();
+      // The conventional model is an additive observation operator
+      //   N_lm = N_lm^rho + I_s N_lm^{h_s} + I_c N_lm^{h_c}.
+      // Compute each physical contribution in the same invariant harmonic
+      // layout and add coefficient-wise. No self-consistent feedback of N onto
+      // boundary deflection is present in this conventional formulation.
+      Postprocess::SphericalHarmonicCoefficients coefficients =
+        Postprocess::compute_density_geoid_harmonics(*this, minimum_degree,
+                                                     maximum_degree, context.first,
+                                                     context.second);
+      if (include_surface_topography)
+        {
+          // A surface height coefficient carries sheet density
+          // Delta rho_s h_lm. The harmonic helper applies the degree-dependent
+          // Newtonian-potential factor and divides by surface gravity to
+          // convert potential to geoid height.
+          const auto &dynamic_topography = this->get_postprocess_manager().template
+                                           get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+          const auto &boundary_densities = this->get_postprocess_manager().template
+                                           get_matching_active_plugin<Postprocess::BoundaryDensities<dim>>();
+          const Postprocess::SphericalHarmonicCoefficients surface_coefficients =
+            Postprocess::compute_surface_topography_geoid_harmonics(
+              *this, dynamic_topography.topography_vector(), minimum_degree, maximum_degree,
+              context.first, context.second, boundary_densities.density_at_top() - density_above);
+          for (unsigned int index = 0; index < coefficients.cosine_coefficients().size(); ++index)
+            {
+              coefficients.cosine(index) += surface_coefficients.cosine(index);
+              coefficients.sine(index) += surface_coefficients.sine(index);
+            }
+        }
+      if (include_cmb_topography)
+        {
+          // CMB relief is radially continued from r_c to r_s and uses the CMB
+          // density jump with the orientation encoded by the shared helper.
+          // Keeping this contribution separate makes its transpose sign and
+          // radius power independently testable.
+          const auto &dynamic_topography = this->get_postprocess_manager().template
+                                           get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+          const auto &boundary_densities = this->get_postprocess_manager().template
+                                           get_matching_active_plugin<Postprocess::BoundaryDensities<dim>>();
+          const auto *geometry_model = dynamic_cast<const GeometryModel::SphericalShell<dim> *>(
+                                         &this->get_geometry_model());
+          AssertThrow(geometry_model != nullptr, ExcInternalError());
+          const Postprocess::SphericalHarmonicCoefficients cmb_coefficients =
+            Postprocess::compute_cmb_topography_geoid_harmonics(
+              *this, dynamic_topography.topography_vector(), minimum_degree, maximum_degree,
+              context.first, geometry_model->inner_radius(), context.second,
+              density_below - boundary_densities.density_at_bottom());
+          for (unsigned int index = 0; index < coefficients.cosine_coefficients().size(); ++index)
+            {
+              coefficients.cosine(index) += cmb_coefficients.cosine(index);
+              coefficients.sine(index) += cmb_coefficients.sine(index);
+            }
+        }
+      return coefficients;
+    }
+
+
+
+    template <int dim>
+    void
+    GeoidObjective<dim>::assemble_surface_topography_seed(
+      LinearAlgebra::BlockVector &topography_adjoint, double &top_area,
+      double &surface_pressure_weight) const
+    {
+      const auto &boundary_densities = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::BoundaryDensities<dim>>();
+      const std::pair<double, double> context = operator_context();
+      const Postprocess::SphericalHarmonicCoefficients topography_coefficients =
+        Postprocess::compute_surface_topography_geoid_transpose(
+          coefficient_seed(), context.first, context.second,
+          boundary_densities.density_at_top() - density_above);
+      // coefficient_seed is dJ/dN_lm. The harmonic transpose returns the
+      // scalar field seed dJ/dh(theta,phi). We next assemble the FE dual vector
+      //   bar h_i = integral_Gamma bar h phi_i dS,
+      // using exactly the quadrature used for forward harmonic analysis.
+      const types::boundary_id top_boundary_id =
+        this->get_geometry_model().translate_symbolic_boundary_name_to_id("top");
+      // The topography dual vector must use the forward harmonic analysis
+      // quadrature, independently of the quadrature used internally by CBF.
+      const unsigned int quadrature_degree =
+        this->introspection().polynomial_degree.temperature;
+      const QGauss<dim-1> quadrature_formula_face(quadrature_degree);
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      FEFaceValues<dim> fe_face_values(this->get_mapping(), this->get_fe(), quadrature_formula_face,
+                                       update_values | update_gradients | update_quadrature_points |
+                                       update_normal_vectors | update_JxW_values);
+      Vector<double> local_topography_adjoint(dofs_per_cell);
+      topography_adjoint = 0.0;
+      top_area = 0.0;
+      surface_pressure_weight = 0.0;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          for (const unsigned int face : cell->face_indices())
+            if (cell->at_boundary(face) && cell->face(face)->boundary_id() == top_boundary_id)
+              {
+                fe_face_values.reinit(cell, face);
+                local_topography_adjoint = 0.0;
+                MaterialModel::MaterialModelInputs<dim> in(fe_face_values, cell,
+                                                           this->introspection(), this->get_solution());
+                MaterialModel::MaterialModelOutputs<dim> out(fe_face_values.n_quadrature_points,
+                                                             this->n_compositional_fields());
+                in.requested_properties = MaterialModel::MaterialProperties::density;
+                this->get_material_model().evaluate(in, out);
+                for (unsigned int q = 0; q < quadrature_formula_face.size(); ++q)
+                  {
+                    const std::array<double, dim> spherical_position =
+                      Utilities::Coordinates::cartesian_to_spherical_coordinates(
+                        fe_face_values.quadrature_point(q));
+                    const double seed_value = topography_coefficients.evaluate(spherical_position[2],
+                                                                               spherical_position[1]);
+                    const Tensor<1, dim> gravity = this->get_gravity_model().gravity_vector(
+                                                     fe_face_values.quadrature_point(q));
+                    const double gravity_norm = gravity.norm();
+                    const double density_contrast = out.densities[q] - density_above;
+                    AssertThrow(std::abs(density_contrast) > std::numeric_limits<double>::min(),
+                                ExcMessage("GeoidObjective encountered zero surface density contrast."));
+                    AssertThrow(gravity_norm > std::numeric_limits<double>::min(),
+                                ExcMessage("GeoidObjective encountered zero surface gravity."));
+                    top_area += fe_face_values.JxW(q);
+                    // The CBF topography definition includes removal of mean
+                    // pressure and division by Delta rho |g|. Accumulate the
+                    // scalar seed of that boundary mean alongside the FE
+                    // topography seed so the boundary operator can transpose
+                    // both dependencies in one pass.
+                    surface_pressure_weight += seed_value / (density_contrast * gravity_norm)
+                                               * fe_face_values.JxW(q);
+                    for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                      local_topography_adjoint(i) += seed_value
+                                                     * fe_face_values[this->introspection().extractors.temperature].value(i, q)
+                                                     * fe_face_values.JxW(q);
+                  }
+                cell->distribute_local_to_global(local_topography_adjoint, topography_adjoint);
+              }
+      topography_adjoint.compress(VectorOperation::add);
+      // Face ownership partitions both the dual-vector assembly and the two
+      // scalar boundary integrals. The vector compress and MPI reductions
+      // therefore complete different pieces of the same global transpose.
+      top_area = Utilities::MPI::sum(top_area, this->get_mpi_communicator());
+      surface_pressure_weight = Utilities::MPI::sum(surface_pressure_weight, this->get_mpi_communicator());
+    }
+
+
+
+    template <int dim>
+    void
+    GeoidObjective<dim>::assemble_cmb_topography_seed(
+      LinearAlgebra::BlockVector &topography_adjoint, double &bottom_area,
+      double &bottom_pressure_weight) const
+    {
+      // This is the CMB analogue of assemble_surface_topography_seed(). The
+      // harmonic transpose already contains radial continuation; this routine
+      // only maps its physical boundary-field seed into the discrete FE dual
+      // vector and records the pressure-mean scalar seed.
+      const auto &boundary_densities = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::BoundaryDensities<dim>>();
+      const auto *geometry_model = dynamic_cast<const GeometryModel::SphericalShell<dim> *>(
+                                     &this->get_geometry_model());
+      AssertThrow(geometry_model != nullptr, ExcInternalError());
+      const std::pair<double, double> context = operator_context();
+      const Postprocess::SphericalHarmonicCoefficients topography_coefficients =
+        Postprocess::compute_cmb_topography_geoid_transpose(
+          coefficient_seed(), context.first, geometry_model->inner_radius(), context.second,
+          density_below - boundary_densities.density_at_bottom());
+      const types::boundary_id bottom_boundary_id =
+        this->get_geometry_model().translate_symbolic_boundary_name_to_id("bottom");
+      const unsigned int quadrature_degree =
+        this->introspection().polynomial_degree.temperature;
+      const QGauss<dim-1> quadrature_formula_face(quadrature_degree);
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      FEFaceValues<dim> fe_face_values(this->get_mapping(), this->get_fe(), quadrature_formula_face,
+                                       update_values | update_gradients | update_quadrature_points |
+                                       update_normal_vectors | update_JxW_values);
+      Vector<double> local_topography_adjoint(dofs_per_cell);
+      topography_adjoint = 0.0;
+      bottom_area = 0.0;
+      bottom_pressure_weight = 0.0;
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          for (const unsigned int face : cell->face_indices())
+            if (cell->at_boundary(face) && cell->face(face)->boundary_id() == bottom_boundary_id)
+              {
+                fe_face_values.reinit(cell, face);
+                local_topography_adjoint = 0.0;
+                MaterialModel::MaterialModelInputs<dim> in(fe_face_values, cell,
+                                                           this->introspection(), this->get_solution());
+                MaterialModel::MaterialModelOutputs<dim> out(fe_face_values.n_quadrature_points,
+                                                             this->n_compositional_fields());
+                in.requested_properties = MaterialModel::MaterialProperties::density;
+                this->get_material_model().evaluate(in, out);
+                for (unsigned int q = 0; q < quadrature_formula_face.size(); ++q)
+                  {
+                    const std::array<double, dim> spherical_position =
+                      Utilities::Coordinates::cartesian_to_spherical_coordinates(
+                        fe_face_values.quadrature_point(q));
+                    const double seed_value = topography_coefficients.evaluate(spherical_position[2],
+                                                                               spherical_position[1]);
+                    const double gravity_norm = this->get_gravity_model().gravity_vector(
+                                                  fe_face_values.quadrature_point(q)).norm();
+                    const double density_contrast = out.densities[q] - density_below;
+                    AssertThrow(std::abs(density_contrast) > std::numeric_limits<double>::min(),
+                                ExcMessage("GeoidObjective encountered zero CMB density contrast."));
+                    bottom_area += fe_face_values.JxW(q);
+                    bottom_pressure_weight += seed_value / (density_contrast * gravity_norm)
+                                              * fe_face_values.JxW(q);
+                    for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                      local_topography_adjoint(i) += seed_value
+                                                     * fe_face_values[this->introspection().extractors.temperature].value(i, q)
+                                                     * fe_face_values.JxW(q);
+                  }
+                cell->distribute_local_to_global(local_topography_adjoint, topography_adjoint);
+              }
+      topography_adjoint.compress(VectorOperation::add);
+      // bottom_area and bottom_pressure_weight are local face integrals until
+      // this collective reduction. They must be identical on all ranks before
+      // the subsequent state-transpose assembly.
+      bottom_area = Utilities::MPI::sum(bottom_area, this->get_mpi_communicator());
+      bottom_pressure_weight = Utilities::MPI::sum(bottom_pressure_weight, this->get_mpi_communicator());
+    }
+
+
+
+    template <int dim>
+    Postprocess::SphericalHarmonicCoefficients
+    GeoidObjective<dim>::coefficient_seed() const
+    {
+      Postprocess::SphericalHarmonicCoefficients coefficients = forward_coefficients();
+      // For
+      //   J = 1/2 sum_lm w_lm[(C-Cobs)^2+(S-Sobs)^2],
+      // the spectral covector is w_lm times the coefficient residual. Reusing
+      // the coefficient container preserves the exact (l,m) layout throughout
+      // every downstream transpose.
+      for (unsigned int index = 0; index < coefficients.cosine_coefficients().size(); ++index)
+        {
+          coefficients.cosine(index) = weights[index]
+                                       * (coefficients.cosine(index)
+                                          - observed_coefficients.cosine(index));
+          coefficients.sine(index) = weights[index]
+                                     * (coefficients.sine(index)
+                                        - observed_coefficients.sine(index));
+        }
+      return coefficients;
+    }
+
+
+
+    template <int dim>
+    double
+    GeoidObjective<dim>::evaluate() const
+    {
+      const Postprocess::SphericalHarmonicCoefficients coefficients = forward_coefficients();
+      double objective = 0.0;
+      // Cosine and sine coefficients are independent real degrees of freedom
+      // under this normalization. Accumulate their weighted Euclidean
+      // misfit; the factor 1/2 cancels the factor 2 in its derivative.
+      for (unsigned int index = 0; index < coefficients.cosine_coefficients().size(); ++index)
+        {
+          const double cosine_residual =
+            coefficients.cosine(index) - observed_coefficients.cosine(index);
+          const double sine_residual =
+            coefficients.sine(index) - observed_coefficients.sine(index);
+          objective += 0.5 * weights[index]
+                       * (cosine_residual * cosine_residual + sine_residual * sine_residual);
+        }
+      return objective;
+    }
+
+
+
+    template <int dim>
+    void
+    GeoidObjective<dim>::assemble_adjoint_right_hand_side(
+      LinearAlgebra::BlockVector &rhs) const
+    {
+      if (include_surface_topography)
+        {
+          // Reverse N <- h_s first, obtaining bar h_s, and then reverse the
+          // CBF map h_s <- (u,p,rho,eta). The boundary operator adds only the
+          // state part here; direct rho/eta terms are accumulated separately
+          // in add_direct_kernel_contributions().
+          LinearAlgebra::BlockVector topography_adjoint(
+            this->introspection().index_sets.system_partitioning,
+            this->introspection().index_sets.system_relevant_partitioning,
+            this->get_mpi_communicator());
+          double top_area = 0.0;
+          double surface_pressure_weight = 0.0;
+          assemble_surface_topography_seed(topography_adjoint, top_area, surface_pressure_weight);
+          DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_state_transpose(
+            topography_adjoint, top_area, surface_pressure_weight, density_above, rhs,
+            Postprocess::DynamicTopographyBoundary::surface);
+        }
+      if (include_cmb_topography)
+        {
+          // The surface and CMB chains share the same implementation but use
+          // distinct density contrasts, normals, boundary measures, and
+          // pressure-mean corrections.
+          LinearAlgebra::BlockVector topography_adjoint(
+            this->introspection().index_sets.system_partitioning,
+            this->introspection().index_sets.system_relevant_partitioning,
+            this->get_mpi_communicator());
+          double bottom_area = 0.0;
+          double bottom_pressure_weight = 0.0;
+          assemble_cmb_topography_seed(topography_adjoint, bottom_area, bottom_pressure_weight);
+          DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_state_transpose(
+            topography_adjoint, bottom_area, bottom_pressure_weight, density_below, rhs,
+            Postprocess::DynamicTopographyBoundary::cmb);
+        }
+      // J depends only on the explicit material-density observation operator.
+      // requires_physical_stokes_adjoint() consequently lets the manager
+      // supply an exactly zero state without a physical Stokes solve.
+      (void)rhs;
+    }
+
+
+
+    template <int dim>
+    bool
+    GeoidObjective<dim>::requires_physical_stokes_adjoint() const
+    {
+      return include_surface_topography || include_cmb_topography;
+    }
+
+
+
+    template <int dim>
+    std::set<std::string>
+    GeoidObjective<dim>::required_forward_postprocessors() const
+    {
+      if (include_surface_topography || include_cmb_topography)
+        return {"dynamic topography", "boundary densities"};
+      return {};
+    }
+
+
+
+    template <int dim>
+    void
+    GeoidObjective<dim>::add_direct_kernel_contributions(
+      const std::string &objective_name, KernelRepository<dim> &kernels) const
+    {
+      const std::pair<double, double> context = operator_context();
+      const Postprocess::SphericalHarmonicCoefficients seed = coefficient_seed();
+      const Vector<double> density_kernel =
+        Postprocess::compute_density_geoid_transpose(*this, seed, context.first, context.second);
+      // The volume-density observation is explicit: transpose its solid-
+      // harmonic projection directly into a cellwise density kernel. It does
+      // not require solving the physical Stokes adjoint.
+      kernels.add_contribution({objective_name, "mantle-density geoid harmonic",
+                                PhysicalProperty::density
+                               }, density_kernel);
+      if (include_surface_topography)
+        {
+          // Add the denominator and CBF-residual material derivatives of the
+          // surface topography chain. These are deliberately separate from
+          // the state RHS assembled above to avoid double-counting eta/rho.
+          const auto &dynamic_topography = this->get_postprocess_manager().template
+                                           get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+          LinearAlgebra::BlockVector topography_adjoint(
+            this->introspection().index_sets.system_partitioning,
+            this->introspection().index_sets.system_relevant_partitioning,
+            this->get_mpi_communicator());
+          double top_area = 0.0;
+          double surface_pressure_weight = 0.0;
+          assemble_surface_topography_seed(topography_adjoint, top_area, surface_pressure_weight);
+          DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_direct_kernel_contributions(
+            topography_adjoint, dynamic_topography.topography_vector(), density_above,
+            objective_name, kernels, Postprocess::DynamicTopographyBoundary::surface);
+        }
+      if (include_cmb_topography)
+        {
+          const auto &dynamic_topography = this->get_postprocess_manager().template
+                                           get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+          LinearAlgebra::BlockVector topography_adjoint(
+            this->introspection().index_sets.system_partitioning,
+            this->introspection().index_sets.system_relevant_partitioning,
+            this->get_mpi_communicator());
+          double bottom_area = 0.0;
+          double bottom_pressure_weight = 0.0;
+          assemble_cmb_topography_seed(topography_adjoint, bottom_area, bottom_pressure_weight);
+          DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_direct_kernel_contributions(
+            topography_adjoint, dynamic_topography.topography_vector(), density_below,
+            objective_name, kernels, Postprocess::DynamicTopographyBoundary::cmb);
+        }
+    }
+
+
+
+    template <int dim>
+    void
+    GeoidObjective<dim>::declare_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection("Adjoint");
+      {
+        prm.enter_subsection("Geoid");
+        {
+          prm.declare_entry("Minimum spherical harmonic degree", "0", Patterns::Integer(0),
+                            "Minimum degree l_min in the shared degree-major geoid coefficient layout.");
+          prm.declare_entry("Maximum spherical harmonic degree", "0", Patterns::Integer(0),
+                            "Maximum degree l_max in the shared degree-major geoid coefficient layout.");
+          prm.declare_entry("Observed cosine coefficients", "", Patterns::Anything(),
+                            "Comma-separated observed cosine coefficients in shared degree-major order.");
+          prm.declare_entry("Observed sine coefficients", "", Patterns::Anything(),
+                            "Comma-separated observed sine coefficients in shared degree-major order.");
+          prm.declare_entry("Coefficient weights", "", Patterns::Anything(),
+                            "Optional comma-separated nonnegative diagonal weights. One weight applies to both "
+                            "cosine and sine components of each degree/order; an empty list means all weights are one.");
+          prm.declare_entry("Include surface dynamic topography contribution", "false", Patterns::Bool(),
+                            "Include the surface dynamic-topography geoid contribution through the validated top CBF transpose.");
+          prm.declare_entry("Surface density above", "0", Patterns::Double(0.0),
+                            "Density above the surface used by the dynamic-topography and surface-geoid operators.");
+          prm.declare_entry("Include CMB dynamic topography contribution", "false", Patterns::Bool(),
+                            "Include the CMB dynamic-topography geoid contribution through the bottom CBF transpose.");
+          prm.declare_entry("CMB density below", "9900", Patterns::Double(0.0),
+                            "Density below the CMB used by the CMB dynamic-topography and geoid operators.");
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    void
+    GeoidObjective<dim>::parse_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection("Adjoint");
+      {
+        prm.enter_subsection("Geoid");
+        {
+          minimum_degree = prm.get_integer("Minimum spherical harmonic degree");
+          maximum_degree = prm.get_integer("Maximum spherical harmonic degree");
+          include_surface_topography = prm.get_bool("Include surface dynamic topography contribution");
+          density_above = prm.get_double("Surface density above");
+          include_cmb_topography = prm.get_bool("Include CMB dynamic topography contribution");
+          density_below = prm.get_double("CMB density below");
+          AssertThrow(minimum_degree <= maximum_degree,
+                      ExcMessage("The minimum geoid degree must not exceed the maximum degree."));
+
+          const Postprocess::SphericalHarmonicCoefficients layout(minimum_degree,
+                                                                  maximum_degree);
+          const unsigned int coefficient_count = layout.size();
+
+          const std::vector<double> observed_cosine = Utilities::string_to_double(
+                                                        Utilities::split_string_list(
+                                                          prm.get("Observed cosine coefficients")));
+          const std::vector<double> observed_sine = Utilities::string_to_double(
+                                                      Utilities::split_string_list(
+                                                        prm.get("Observed sine coefficients")));
+          AssertThrow(observed_cosine.size() == coefficient_count
+                      && observed_sine.size() == coefficient_count,
+                      ExcMessage("Observed geoid cosine and sine coefficient lists must each contain exactly "
+                                 + std::to_string(coefficient_count) + " entries."));
+          observed_coefficients.reinit(minimum_degree, maximum_degree);
+          observed_coefficients.set_coefficients(observed_cosine, observed_sine);
+
+          const std::string weight_string = prm.get("Coefficient weights");
+          if (weight_string.empty())
+            weights.assign(coefficient_count, 1.0);
+          else
+            weights = Utilities::string_to_double(Utilities::split_string_list(weight_string));
+          AssertThrow(weights.size() == coefficient_count,
+                      ExcMessage("The geoid coefficient weight list must contain exactly "
+                                 + std::to_string(coefficient_count) + " entries."));
+          for (const double weight : weights)
+            AssertThrow(weight >= 0.0,
+                        ExcMessage("Geoid coefficient weights must be nonnegative."));
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+  }
+}
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    ASPECT_REGISTER_ADJOINT_OBJECTIVE(GeoidObjective,
+                                      "geoid",
+                                      "Coefficient-space non-self-gravitating geoid objective. It evaluates one half "
+                                      "of the diagonally weighted spherical-harmonic coefficient misfit for mantle "
+                                      "density and optional surface/CMB dynamic topography. Enabled topography "
+                                      "branches share one physical Stokes adjoint; the mantle-density contribution "
+                                      "is the direct transpose of the shared harmonic operator.")
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/objective/geoid_objective.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/objective/objective_functional.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/utilities.h>
+
+#include <deal.II/base/utilities.h>
+
+#include <set>
+#include <tuple>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace Objective
+    {
+      namespace
+      {
+        std::tuple<aspect::internal::Plugins::UnusablePluginList,
+            aspect::internal::Plugins::UnusablePluginList,
+            aspect::internal::Plugins::PluginList<Interface<2>>,
+            aspect::internal::Plugins::PluginList<Interface<3>>> registered_objectives;
+      }
+
+
+
+      template <int dim>
+      std::set<std::string>
+      Interface<dim>::required_forward_postprocessors() const
+      {
+        return {};
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::register_objective_functional(const std::string &name,
+                                                  const std::string &description,
+                                                  void (*declare_parameters_function) (ParameterHandler &),
+                                                  std::unique_ptr<Interface<dim>> (*factory_function) ())
+      {
+        std::get<dim>(registered_objectives).register_plugin(name,
+                                                             description,
+                                                             declare_parameters_function,
+                                                             factory_function);
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::declare_parameters (ParameterHandler &prm)
+      {
+        prm.enter_subsection("Adjoint");
+        {
+          prm.declare_entry("List of objectives", "",
+                            Patterns::MultipleSelection(std::get<dim>(registered_objectives).get_pattern_of_names()),
+                            "Comma separated list of adjoint objective functionals.\n\n"
+                            "The following objective functionals are available:\n\n"
+                            +
+                            std::get<dim>(registered_objectives).get_description_string());
+        }
+        prm.leave_subsection();
+
+        std::get<dim>(registered_objectives).declare_parameters(prm);
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::parse_parameters(ParameterHandler &prm)
+      {
+        this->plugin_objects.clear();
+        this->plugin_names.clear();
+
+        prm.enter_subsection("Adjoint");
+        {
+          this->plugin_names =
+            Utilities::split_string_list(prm.get("List of objectives"));
+        }
+        prm.leave_subsection();
+
+        AssertThrow(Utilities::has_unique_entries(this->plugin_names),
+                    ExcMessage("The list of strings for the parameter "
+                               "'Adjoint/List of objectives' contains entries more than once. "
+                               "This is not allowed. Please check your parameter file."));
+
+        // Instantiate each selected objective through the ASPECT plugin
+        // registry. The order is preserved so that objective results and
+        // adjoint states can later be paired by index.
+        for (const std::string &objective_name : this->plugin_names)
+          {
+            this->plugin_objects.emplace_back(std::get<dim>(registered_objectives)
+                                              .create_plugin(objective_name,
+                                                             "Adjoint::List of objectives"));
+            this->plugin_objects.back()->initialize_simulator(this->get_simulator());
+            this->plugin_objects.back()->parse_parameters(prm);
+            this->plugin_objects.back()->initialize();
+          }
+      }
+
+
+
+      template <int dim>
+      std::set<std::string>
+      Manager<dim>::required_forward_postprocessors() const
+      {
+        // Form a set union so shared dependencies run once even when several
+        // objectives consume the same forward postprocessor cache.
+        std::set<std::string> required_postprocessors;
+
+        for (const auto &objective : this->get_active_plugins())
+          {
+            const std::set<std::string> objective_required_postprocessors =
+              objective->required_forward_postprocessors();
+
+            required_postprocessors.insert(objective_required_postprocessors.begin(),
+                                           objective_required_postprocessors.end());
+          }
+
+        return required_postprocessors;
+      }
+
+
+
+      template <int dim>
+      std::vector<std::unique_ptr<ObjectiveResult>>
+      Manager<dim>::evaluate_and_assemble_right_hand_sides() const
+      {
+        const auto &objective_functionals = this->get_active_plugins();
+        const auto &objective_names = this->get_active_plugin_names();
+
+        AssertThrow(objective_functionals.size() == objective_names.size(),
+                    ExcInternalError());
+
+        std::vector<std::unique_ptr<ObjectiveResult>> objective_results;
+        objective_results.reserve(objective_names.size());
+
+        auto objective = objective_functionals.begin();
+        for (unsigned int objective_index = 0;
+             objective_index < objective_names.size();
+             ++objective_index, ++objective)
+          {
+            // Capability dispatch is explicit: only InstantaneousInterface
+            // plugins participate in this workflow. Keep J_k and bar(x)_k
+            // together so the steady workflow solves one physical adjoint per
+            // objective and preserves kernel provenance.
+            const auto *instantaneous =
+              dynamic_cast<const InstantaneousInterface<dim> *>(objective->get());
+            if (instantaneous == nullptr)
+              continue;
+
+            auto result = std::make_unique<ObjectiveResult>();
+            result->objective_name = objective_names[objective_index];
+            result->value = (*objective)->evaluate();
+            result->right_hand_side.reinit(
+              this->introspection().index_sets.system_partitioning,
+              this->get_mpi_communicator());
+            result->right_hand_side = 0.0;
+
+            instantaneous->assemble_adjoint_right_hand_side(result->right_hand_side);
+            objective_results.push_back(std::move(result));
+          }
+
+        return objective_results;
+      }
+
+      template <int dim>
+      std::map<std::string, double>
+      Manager<dim>::evaluate_and_assemble_terminal_temperature_right_hand_side(
+        LinearAlgebra::BlockVector &right_hand_side) const
+      {
+        return evaluate_and_assemble_terminal_advection_field_right_hand_side(AdvectionField::temperature(),
+                                                                              right_hand_side);
+      }
+
+      template <int dim>
+      std::map<std::string, double>
+      Manager<dim>::evaluate_and_assemble_terminal_advection_field_right_hand_side(
+        const AdvectionField &advection_field,
+        LinearAlgebra::BlockVector &right_hand_side) const
+      {
+        const auto &objective_functionals = this->get_active_plugins();
+        const auto &objective_names = this->get_active_plugin_names();
+
+        AssertThrow(objective_functionals.size() == objective_names.size(),
+                    ExcInternalError());
+
+        // Multiple terminal objectives may seed the same final advection
+        // field. Their scalar values remain named separately, while linearity
+        // of differentiation permits their FE covectors to add into one
+        // right_hand_side before the reverse solve.
+        std::map<std::string, double> values;
+
+        auto objective = objective_functionals.begin();
+        for (unsigned int objective_index = 0;
+             objective_index < objective_names.size();
+             ++objective_index, ++objective)
+          {
+            const auto *terminal =
+              dynamic_cast<const TerminalInterface<dim> *>(objective->get());
+            if (terminal == nullptr)
+              continue;
+
+            values[objective_names[objective_index]] = (*objective)->evaluate();
+            terminal->assemble_terminal_advection_field_right_hand_side(
+              advection_field, right_hand_side);
+          }
+
+        right_hand_side.compress(VectorOperation::add);
+        return values;
+      }
+
+      template <int dim>
+      std::map<std::string, double>
+      Manager<dim>::evaluate_running_stokes_objectives(const unsigned int timestep) const
+      {
+        // Running objectives return the already time-discretized contribution
+        // associated with this accepted step. TrajectoryManager accumulates
+        // these scalars over the forward schedule.
+        std::map<std::string, double> values;
+        const auto &objective_functionals = this->get_active_plugins();
+        const auto &objective_names = this->get_active_plugin_names();
+        AssertThrow(objective_functionals.size() == objective_names.size(), ExcInternalError());
+        auto objective = objective_functionals.begin();
+        for (unsigned int objective_index = 0; objective_index < objective_names.size();
+             ++objective_index, ++objective)
+          if (const auto *running = dynamic_cast<const RunningStokesInterface<dim> *>(objective->get()))
+            values[objective_names[objective_index]] =
+              running->evaluate_running_stokes_objective(timestep);
+        return values;
+      }
+
+      template <int dim>
+      void
+      Manager<dim>::assemble_running_stokes_adjoint_right_hand_side(
+        const unsigned int timestep,
+        LinearAlgebra::BlockVector &right_hand_side) const
+      {
+        // At reverse step n, add all derivatives of the running functional
+        // with respect to the quasi-static Stokes state at n. The combined RHS
+        // requires only one Stokes transpose solve at this time level.
+        for (const auto &objective : this->get_active_plugins())
+          if (const auto *running = dynamic_cast<const RunningStokesInterface<dim> *>(objective.get()))
+            running->assemble_running_stokes_adjoint_rhs(timestep, right_hand_side);
+        right_hand_side.compress(VectorOperation::add);
+      }
+
+
+
+      template <int dim>
+      void
+      Manager<dim>::add_direct_kernel_contributions(KernelRepository<dim> &kernels) const
+      {
+        const auto &objective_functionals = this->get_active_plugins();
+        const auto &objective_names = this->get_active_plugin_names();
+
+        AssertThrow(objective_functionals.size() == objective_names.size(),
+                    ExcInternalError());
+
+        // Direct kernels differentiate observation/postprocessor formulas at
+        // fixed state. They are separate additive paths from the implicit
+        // kernels obtained by contracting the physical Stokes adjoint.
+        auto objective = objective_functionals.begin();
+        for (unsigned int objective_index = 0;
+             objective_index < objective_names.size();
+             ++objective_index, ++objective)
+          if (const auto *instantaneous =
+                dynamic_cast<const InstantaneousInterface<dim> *>(objective->get()))
+            instantaneous->add_direct_kernel_contributions(objective_names[objective_index],
+                                                           kernels);
+      }
+    }
+  }
+}
+
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template std::set<std::string> Adjoint::Objective::Interface<dim>::required_forward_postprocessors() const; \
+  template class Adjoint::Objective::Manager<dim>;
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}
+
+========================================================================================
+// END FILE: source/adjoint/objective/objective_functional.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/objective/self_gravitating_geoid_objective.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+*/
+
+#include <aspect/adjoint/objective/self_gravitating_geoid_objective.h>
+
+#include <aspect/adjoint/operators/dynamic_topography_boundary_operator.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/postprocess/boundary_densities.h>
+#include <aspect/postprocess/dynamic_topography.h>
+#include <aspect/postprocess/forward_boundary_reduced_stress.h>
+#include <aspect/simulator.h>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    namespace
+    {
+      bool nonzero(const Postprocess::SphericalHarmonicCoefficients &coefficients)
+      {
+        return std::any_of(coefficients.cosine_coefficients().begin(),
+                           coefficients.cosine_coefficients().end(),
+                           [](const double value)
+        {
+          return value != 0.0;
+        })
+        || std::any_of(coefficients.sine_coefficients().begin(),
+                       coefficients.sine_coefficients().end(),
+                       [](const double value)
+        {
+          return value != 0.0;
+        });
+      }
+    }
+
+    template <int dim>
+    Postprocess::SelfGravitatingGeoidOperatorInputs
+    SelfGravitatingGeoidObjective<dim>::inputs() const
+    {
+      // Assemble all Simulator-dependent data once into the value-type input
+      // of the pure spectral operator: density moments, reduced stresses,
+      // radii, gravity, and boundary mean densities. The external densities
+      // also enter the CBF topography conversion, so accepting inconsistent
+      // values here would break forward/transpose duality.
+      const Postprocess::SelfGravitatingGeoidOperatorInputs result =
+        Postprocess::compute_self_gravitating_geoid_inputs(*this, minimum_degree, maximum_degree);
+      const double scale = std::max({1.0, std::abs(density_above), std::abs(density_below),
+                                     std::abs(result.density_above), std::abs(result.density_below)
+                                    });
+      AssertThrow(std::abs(result.density_above - density_above) <= 1.e-12 * scale
+                  && std::abs(result.density_below - density_below) <= 1.e-12 * scale,
+                  ExcMessage("Self-gravitating geoid external densities must match the required "
+                             "Postprocess/Dynamic topography Density above and Density below settings."));
+      return result;
+    }
+
+    template <int dim>
+    Postprocess::SelfGravitatingGeoidCoefficients
+    SelfGravitatingGeoidObjective<dim>::forward_coefficients() const
+    {
+      return Postprocess::SelfGravitatingGeoidOperator().apply(inputs());
+    }
+
+    template <int dim>
+    Postprocess::SelfGravitatingGeoidCoefficients
+    SelfGravitatingGeoidObjective<dim>::coefficient_seed() const
+    {
+      // For the four-field least-squares functional
+      //
+      //   J=1/2 sum_k w_k ||x_k-x_k^obs||_2^2,
+      //
+      // the coefficient seed is bar(x_k)=w_k(x_k-x_k^obs). The same weights
+      // apply to cosine and sine components; the four fields remain distinct
+      // because the coupled 4x4 operator mixes them in its transpose.
+      Postprocess::SelfGravitatingGeoidCoefficients seed = forward_coefficients();
+      const std::array<Postprocess::SphericalHarmonicCoefficients *, 4> fields = {{
+          &seed.surface_topography, &seed.cmb_topography,
+          &seed.surface_geoid, &seed.cmb_geoid
+        }
+      };
+      for (unsigned int field = 0; field < fields.size(); ++field)
+        for (unsigned int index = 0; index < fields[field]->size(); ++index)
+          {
+            fields[field]->cosine(index) = weights[index]
+                                           * (fields[field]->cosine(index)
+                                              - observed_coefficients[field].cosine(index));
+            fields[field]->sine(index) = weights[index]
+                                         * (fields[field]->sine(index)
+                                            - observed_coefficients[field].sine(index));
+          }
+      return seed;
+    }
+
+    template <int dim>
+    bool
+    SelfGravitatingGeoidObjective<dim>::has_traction_seed(
+      const Postprocess::SelfGravitatingGeoidRHSSeeds &seeds) const
+    {
+      return nonzero(seeds.surface_reduced_stress) || nonzero(seeds.cmb_reduced_stress);
+    }
+
+    template <int dim>
+    double
+    SelfGravitatingGeoidObjective<dim>::evaluate() const
+    {
+      const Postprocess::SelfGravitatingGeoidCoefficients forward = forward_coefficients();
+      const std::array<const Postprocess::SphericalHarmonicCoefficients *, 4> fields = {{
+          &forward.surface_topography, &forward.cmb_topography,
+          &forward.surface_geoid, &forward.cmb_geoid
+        }
+      };
+      double objective = 0.0;
+      // Accumulate in coefficient space rather than physical space. With the
+      // shared real-harmonic normalization this treats each stored (l,m)
+      // cosine/sine datum exactly as prescribed by its user weight.
+      for (unsigned int field = 0; field < fields.size(); ++field)
+        for (unsigned int index = 0; index < fields[field]->size(); ++index)
+          {
+            const double cosine_residual =
+              fields[field]->cosine(index)
+              - observed_coefficients[field].cosine(index);
+            const double sine_residual =
+              fields[field]->sine(index)
+              - observed_coefficients[field].sine(index);
+            objective += 0.5 * weights[index]
+                         * (cosine_residual * cosine_residual + sine_residual * sine_residual);
+          }
+      return objective;
+    }
+
+    template <int dim>
+    void
+    SelfGravitatingGeoidObjective<dim>::assemble_adjoint_right_hand_side(
+      LinearAlgebra::BlockVector &rhs) const
+    {
+      const Postprocess::SelfGravitatingGeoidOperatorInputs forward_inputs = inputs();
+      const Postprocess::SelfGravitatingGeoidTransposeCoefficients transpose =
+        Postprocess::SelfGravitatingGeoidOperator().apply_transpose(forward_inputs, coefficient_seed());
+      const auto &dynamic_topography = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+      const auto add_boundary = [&](const Postprocess::SphericalHarmonicCoefficients &traction_seed,
+                                    const Postprocess::DynamicTopographyBoundary boundary,
+                                    const double radius,
+                                    const double density_exterior)
+      {
+        if (!nonzero(traction_seed))
+          return;
+
+        // The spectral transpose first produces a seed for the boundary
+        // reduced-stress coefficients. Projection transpose converts it into
+        // an FE dual vector for CBF topography. The boundary operator then
+        // applies the transpose of CBF and reduced traction to obtain the
+        // velocity-pressure right-hand side of the physical Stokes adjoint.
+        LinearAlgebra::BlockVector topography_adjoint(
+          this->introspection().index_sets.system_partitioning,
+          this->introspection().index_sets.system_relevant_partitioning,
+          this->get_mpi_communicator());
+        double area = 0.0, pressure_weight = 0.0;
+        Postprocess::assemble_boundary_reduced_stress_transpose(
+          *this, traction_seed, boundary, radius, density_exterior,
+          topography_adjoint, area, pressure_weight);
+        DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_state_transpose(
+          topography_adjoint, area, pressure_weight, density_exterior, rhs, boundary);
+      };
+      // Surface and CMB are two additive observation paths into the same
+      // Stokes state. Their transpose seeds therefore add to one RHS, after
+      // which the objective manager performs exactly one physical adjoint
+      // solve rather than solving separately for each boundary.
+      add_boundary(transpose.rhs_seeds.surface_reduced_stress,
+                   Postprocess::DynamicTopographyBoundary::surface,
+                   forward_inputs.outer_radius, dynamic_topography.get_density_above());
+      add_boundary(transpose.rhs_seeds.cmb_reduced_stress,
+                   Postprocess::DynamicTopographyBoundary::cmb,
+                   forward_inputs.inner_radius, dynamic_topography.get_density_below());
+    }
+
+    template <int dim>
+    bool
+    SelfGravitatingGeoidObjective<dim>::requires_physical_stokes_adjoint() const
+    {
+      const Postprocess::SelfGravitatingGeoidOperatorInputs forward_inputs = inputs();
+      const Postprocess::SelfGravitatingGeoidTransposeCoefficients transpose =
+        Postprocess::SelfGravitatingGeoidOperator().apply_transpose(forward_inputs, coefficient_seed());
+      return has_traction_seed(transpose.rhs_seeds);
+    }
+
+    template <int dim>
+    std::set<std::string>
+    SelfGravitatingGeoidObjective<dim>::required_forward_postprocessors() const
+    {
+      return {"dynamic topography", "boundary densities"};
+    }
+
+    template <int dim>
+    void
+    SelfGravitatingGeoidObjective<dim>::add_direct_kernel_contributions(
+      const std::string &objective_name, KernelRepository<dim> &kernels) const
+    {
+      const Postprocess::SelfGravitatingGeoidOperatorInputs forward_inputs = inputs();
+      const Postprocess::SelfGravitatingGeoidCoefficients forward_solution =
+        Postprocess::SelfGravitatingGeoidOperator().apply(forward_inputs);
+      const Postprocess::SelfGravitatingGeoidTransposeCoefficients transpose =
+        Postprocess::SelfGravitatingGeoidOperator().apply_transpose(forward_inputs, coefficient_seed());
+      // The coupled spectral output depends on volume density by three
+      // mathematically different paths: two explicit forcing moments and the
+      // boundary mean densities inside A_l. The first two are the transpose of
+      // b_l(rho); keep them separate from -z_l^T(dA_l/drho)x_l below.
+      kernels.add_contribution({objective_name, "self-gravitating surface density moment",
+                                PhysicalProperty::density
+                               },
+                               Postprocess::compute_self_gravitating_density_moment_transpose(
+                                 *this, transpose.rhs_seeds.surface_density_moment,
+                                 forward_inputs.outer_radius, forward_inputs.inner_radius,
+                                 Postprocess::SelfGravitatingDensityMoment::surface));
+      kernels.add_contribution({objective_name, "self-gravitating CMB density moment",
+                                PhysicalProperty::density
+                               },
+                               Postprocess::compute_self_gravitating_density_moment_transpose(
+                                 *this, transpose.rhs_seeds.cmb_density_moment,
+                                 forward_inputs.outer_radius, forward_inputs.inner_radius,
+                                 Postprocess::SelfGravitatingDensityMoment::cmb));
+
+      // For A_l(rho_boundary)x_l=b_l, implicit differentiation contributes
+      //
+      //   dJ/drho_boundary = -z_l^T (dA_l/drho_boundary) x_l,
+      //   A_l^T z_l = bar(x_l).
+      //
+      // Only the two area-weighted mantle means that construct A_l are chained
+      // here. Explicit moments, CBF, and implicit-Stokes terms are independent
+      // paths and must not be re-added through this contraction.
+      const Postprocess::SelfGravitatingMatrixDensitySensitivity matrix_sensitivity =
+        Postprocess::SelfGravitatingGeoidOperator().matrix_density_sensitivity(
+          forward_inputs, forward_solution, transpose);
+      Vector<double> matrix_density_kernel =
+        Postprocess::compute_boundary_mean_density_transpose(
+          *this, Postprocess::BoundaryMeanDensityBoundary::top,
+          matrix_sensitivity.top_boundary_density);
+      matrix_density_kernel += Postprocess::compute_boundary_mean_density_transpose(
+                                 *this, Postprocess::BoundaryMeanDensityBoundary::bottom,
+                                 matrix_sensitivity.bottom_boundary_density);
+      kernels.add_contribution({objective_name, "self-gravity matrix density term",
+                                PhysicalProperty::density
+                               }, matrix_density_kernel);
+
+      const auto &dynamic_topography = this->get_postprocess_manager().template
+                                       get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
+      const auto add_boundary = [&](const Postprocess::SphericalHarmonicCoefficients &traction_seed,
+                                    const Postprocess::DynamicTopographyBoundary boundary,
+                                    const double radius,
+                                    const double density_exterior)
+      {
+        if (!nonzero(traction_seed))
+          return;
+
+        // Reuse the same reduced-stress projection transpose as for the
+        // physical RHS, but now differentiate CBF with respect to density and
+        // viscosity while holding the Stokes state fixed. These are direct
+        // material kernels and are added to, not substituted for, the kernel
+        // obtained through the physical Stokes adjoint.
+        LinearAlgebra::BlockVector topography_adjoint(
+          this->introspection().index_sets.system_partitioning,
+          this->introspection().index_sets.system_relevant_partitioning,
+          this->get_mpi_communicator());
+        double area = 0.0, pressure_weight = 0.0;
+        Postprocess::assemble_boundary_reduced_stress_transpose(
+          *this, traction_seed, boundary, radius, density_exterior,
+          topography_adjoint, area, pressure_weight);
+        DynamicTopographyBoundaryOperator<dim>(this->get_simulator()).add_direct_kernel_contributions(
+          topography_adjoint, dynamic_topography.topography_vector(), density_exterior,
+          objective_name, kernels, boundary);
+      };
+      add_boundary(transpose.rhs_seeds.surface_reduced_stress,
+                   Postprocess::DynamicTopographyBoundary::surface,
+                   forward_inputs.outer_radius, dynamic_topography.get_density_above());
+      add_boundary(transpose.rhs_seeds.cmb_reduced_stress,
+                   Postprocess::DynamicTopographyBoundary::cmb,
+                   forward_inputs.inner_radius, dynamic_topography.get_density_below());
+    }
+
+    template <int dim>
+    void
+    SelfGravitatingGeoidObjective<dim>::declare_parameters(ParameterHandler &prm)
+    {
+      prm.enter_subsection("Adjoint");
+      {
+        prm.enter_subsection("Self-gravitating geoid");
+        {
+          prm.declare_entry("Minimum spherical harmonic degree", "2", Patterns::Integer(2),
+                            "Minimum coupled self-gravity harmonic degree. The coupled operator is defined only for l >= 2.");
+          prm.declare_entry("Maximum spherical harmonic degree", "2", Patterns::Integer(2),
+                            "Maximum coupled self-gravity harmonic degree.");
+          const std::array<const char *, 4> names = {{"surface topography", "CMB topography",
+              "surface geoid", "CMB geoid"
+            }
+          };
+          for (const char *name : names)
+            {
+              prm.declare_entry("Observed " + std::string(name) + " cosine coefficients", "", Patterns::Anything(),
+                                "Observed coupled coefficient values in degree-major order.");
+              prm.declare_entry("Observed " + std::string(name) + " sine coefficients", "", Patterns::Anything(),
+                                "Observed coupled coefficient values in degree-major order.");
+            }
+          prm.declare_entry("Coefficient weights", "", Patterns::Anything(),
+                            "Optional nonnegative degree/order weights shared by all four coupled fields and by cosine/sine.");
+          prm.declare_entry("Surface density above", "0", Patterns::Double(0.0),
+                            "Fixed exterior density above the surface. It must match Postprocess/Dynamic topography/Density above.");
+          prm.declare_entry("CMB density below", "9900", Patterns::Double(0.0),
+                            "Fixed exterior density below the CMB. It must match Postprocess/Dynamic topography/Density below.");
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+    template <int dim>
+    void
+    SelfGravitatingGeoidObjective<dim>::parse_parameters(ParameterHandler &prm)
+    {
+      prm.enter_subsection("Adjoint");
+      {
+        prm.enter_subsection("Self-gravitating geoid");
+        {
+          minimum_degree = prm.get_integer("Minimum spherical harmonic degree");
+          maximum_degree = prm.get_integer("Maximum spherical harmonic degree");
+          density_above = prm.get_double("Surface density above");
+          density_below = prm.get_double("CMB density below");
+          AssertThrow(minimum_degree >= 2 && minimum_degree <= maximum_degree,
+                      ExcMessage("The self-gravitating geoid requires 2 <= minimum degree <= maximum degree."));
+          const Postprocess::SphericalHarmonicCoefficients layout(minimum_degree,
+                                                                  maximum_degree);
+          const unsigned int count = layout.size();
+          const std::array<const char *, 4> names = {{"surface topography", "CMB topography",
+              "surface geoid", "CMB geoid"
+            }
+          };
+          for (unsigned int field = 0; field < names.size(); ++field)
+            {
+              const std::vector<double> observed_cosine =
+                Utilities::string_to_double(Utilities::split_string_list(
+                                              prm.get("Observed " + std::string(names[field])
+                                                      + " cosine coefficients")));
+              const std::vector<double> observed_sine =
+                Utilities::string_to_double(Utilities::split_string_list(
+                                              prm.get("Observed " + std::string(names[field])
+                                                      + " sine coefficients")));
+              AssertThrow(observed_cosine.size() == count
+                          && observed_sine.size() == count,
+                          ExcMessage("Every coupled self-gravity observed coefficient list must contain exactly "
+                                     + std::to_string(count) + " entries."));
+              observed_coefficients[field].reinit(minimum_degree, maximum_degree);
+              observed_coefficients[field].set_coefficients(observed_cosine,
+                                                            observed_sine);
+            }
+          const std::string weight_string = prm.get("Coefficient weights");
+          weights = weight_string.empty() ? std::vector<double>(count, 1.0)
+                    : Utilities::string_to_double(Utilities::split_string_list(weight_string));
+          AssertThrow(weights.size() == count,
+                      ExcMessage("The coupled self-gravity coefficient weight list has an invalid length."));
+          for (const double weight : weights)
+            AssertThrow(weight >= 0.0, ExcMessage("Coupled self-gravity coefficient weights must be nonnegative."));
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+  }
+}
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    ASPECT_REGISTER_ADJOINT_OBJECTIVE(SelfGravitatingGeoidObjective,
+                                      "self-gravitating geoid",
+                                      "Coupled self-gravitating geoid objective with top/CMB CBF stress, "
+                                      "density-moment, physical Stokes, and boundary-mean density matrix terms. "
+                                      "It excludes gravity, geometry, and external-density matrix derivatives.")
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/objective/self_gravitating_geoid_objective.cc
+========================================================================================
+
+========================================================================================
+// BEGIN FILE: source/adjoint/objective/temperature_field_objective.cc
+========================================================================================
+
+/*
+  Copyright (C) 2011 - 2024 by the authors of the ASPECT code.
+
+  This file is part of ASPECT.
+
+  ASPECT is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2, or (at your option)
+  any later version.
+
+  ASPECT is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with ASPECT; see the file LICENSE.  If not see
+  <http://www.gnu.org/licenses/>.
+*/
+
+#include <aspect/adjoint/objective/temperature_field_objective.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
+#include <aspect/geometry_model/interface.h>
+
+#include <deal.II/base/quadrature_lib.h>
+#include <deal.II/fe/fe_values.h>
+
+namespace aspect
+{
+  namespace Adjoint
+  {
+    template <int dim>
+    TemperatureFieldObjective<dim>::TemperatureFieldObjective ()
+      :
+      target_temperature_function(1),
+      weight_function(1),
+      coordinate_system(Utilities::Coordinates::cartesian)
+    {}
+
+
+
+    template <int dim>
+    double
+    TemperatureFieldObjective<dim>::target_temperature(const Point<dim> &position) const
+    {
+      const Utilities::NaturalCoordinate<dim> point =
+        this->get_geometry_model().cartesian_to_other_coordinates(position,
+                                                                  coordinate_system);
+      return target_temperature_function.value(
+               Utilities::convert_array_to_point<dim>(point.get_coordinates()));
+    }
+
+
+
+    template <int dim>
+    double
+    TemperatureFieldObjective<dim>::weight(const Point<dim> &position) const
+    {
+      const Utilities::NaturalCoordinate<dim> point =
+        this->get_geometry_model().cartesian_to_other_coordinates(position,
+                                                                  coordinate_system);
+      return weight_function.value(
+               Utilities::convert_array_to_point<dim>(point.get_coordinates()));
+    }
+
+
+
+    template <int dim>
+    double
+    TemperatureFieldObjective<dim>::evaluate() const
+    {
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(this->introspection().base_elements.temperature).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_quadrature_points |
+                              update_JxW_values);
+
+      std::vector<double> temperature_values(quadrature_formula.size());
+      std::vector<double> observation_values(quadrature_formula.size());
+      double local_objective = 0.0;
+
+      // Compute the terminal functional
+      //   Phi(T_N)=1/2 integral_Omega w(x)[T_N(x)-T_obs(x)]^2 dx.
+      // A discrete observation uses the same FE evaluation as T_N; otherwise
+      // the parsed analytic target is sampled at quadrature points. Locally
+      // owned cells form disjoint volume partitions, so one MPI sum completes
+      // the global scalar without double-counting ghosts.
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[this->introspection().extractors.temperature]
+            .get_function_values(this->get_solution(),
+                                 temperature_values);
+            if (discrete_terminal_observation != nullptr)
+              fe_values[this->introspection().extractors.temperature]
+              .get_function_values(*discrete_terminal_observation,
+                                   observation_values);
+
+            for (unsigned int q = 0; q < quadrature_formula.size(); ++q)
+              {
+                const Point<dim> &position = fe_values.quadrature_point(q);
+                const double residual = temperature_values[q]
+                                        - (discrete_terminal_observation == nullptr
+                                           ? target_temperature(position)
+                                           : observation_values[q]);
+                local_objective += 0.5 * weight(position) * residual * residual * fe_values.JxW(q);
+              }
+          }
+
+      return Utilities::MPI::sum(local_objective, this->get_mpi_communicator());
+    }
+
+
+
+    template <int dim>
+    void
+    TemperatureFieldObjective<dim>::assemble_terminal_advection_field_right_hand_side(
+      const AdvectionField &advection_field,
+      LinearAlgebra::BlockVector &rhs) const
+    {
+      if (!advection_field.is_temperature())
+        return;
+      // This objective is terminal in time: it seeds the adjoint of the final
+      // temperature field, not the instantaneous Stokes adjoint. For
+      // Phi=1/2 int w(T-T_obs)^2 dx, the coefficient-space covector is
+      //
+      //   b_i=int_Omega w(T_N-T_obs) phi_i dx.
+      //
+      // This is M-weighted residual data, not a pointwise gradient vector.
+      // The reverse advection solve consumes it directly as bar(T_N).
+      const unsigned int quadrature_degree =
+        this->get_fe().base_element(this->introspection().base_elements.temperature).degree + 1;
+      const QGauss<dim> quadrature_formula(quadrature_degree);
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+
+      FEValues<dim> fe_values(this->get_mapping(),
+                              this->get_fe(),
+                              quadrature_formula,
+                              update_values |
+                              update_quadrature_points |
+                              update_JxW_values);
+
+      Vector<double> local_rhs(dofs_per_cell);
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+      std::vector<double> temperature_values(quadrature_formula.size());
+      std::vector<double> observation_values(quadrature_formula.size());
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            fe_values.reinit(cell);
+            fe_values[this->introspection().extractors.temperature]
+            .get_function_values(this->get_solution(),
+                                 temperature_values);
+            if (discrete_terminal_observation != nullptr)
+              fe_values[this->introspection().extractors.temperature]
+              .get_function_values(*discrete_terminal_observation,
+                                   observation_values);
+
+            local_rhs = 0.0;
+            cell->get_dof_indices(local_dof_indices);
+
+            for (unsigned int q = 0; q < quadrature_formula.size(); ++q)
+              {
+                const Point<dim> &position = fe_values.quadrature_point(q);
+                const double seed =
+                  weight(position) * (temperature_values[q]
+                                      - (discrete_terminal_observation == nullptr
+                                         ? target_temperature(position)
+                                         : observation_values[q]));
+
+                // Apply the transpose of FE evaluation at x_q. Constraint-
+                // aware local-to-global distribution below represents this
+                // boundary-free volume functional on the admissible space.
+                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                  local_rhs(i) += seed
+                                  * fe_values[this->introspection().extractors.temperature].value(i, q)
+                                  * fe_values.JxW(q);
+              }
+
+            this->get_current_constraints().distribute_local_to_global(local_rhs,
+                                                                       local_dof_indices,
+                                                                       rhs);
+          }
+    }
+
+
+
+    template <int dim>
+    void
+    TemperatureFieldObjective<dim>::set_discrete_terminal_observation(
+      const LinearAlgebra::BlockVector &observation)
+    {
+      discrete_terminal_observation = std::make_unique<LinearAlgebra::BlockVector>(observation);
+    }
+
+
+
+    template <int dim>
+    void
+    TemperatureFieldObjective<dim>::clear_discrete_terminal_observation()
+    {
+      discrete_terminal_observation.reset();
+    }
+
+
+
+    template <int dim>
+    void
+    TemperatureFieldObjective<dim>::declare_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection ("Adjoint");
+      {
+        prm.enter_subsection ("Temperature field");
+        {
+          prm.declare_entry ("Coordinate system", "cartesian",
+                             Patterns::Selection ("cartesian|spherical|depth"),
+                             "Coordinate system used to evaluate the terminal temperature "
+                             "target and weight functions.");
+
+          prm.enter_subsection ("Target function");
+          {
+            Functions::ParsedFunction<dim>::declare_parameters (prm, 1);
+            prm.declare_entry ("Function expression", "0",
+                               Patterns::Anything(),
+                               "Target final temperature field.");
+          }
+          prm.leave_subsection();
+
+          prm.enter_subsection ("Weight function");
+          {
+            Functions::ParsedFunction<dim>::declare_parameters (prm, 1);
+            prm.declare_entry ("Function expression", "1",
+                               Patterns::Anything(),
+                               "Non-negative spatial weight for the terminal temperature misfit.");
+          }
+          prm.leave_subsection();
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    template <int dim>
+    void
+    TemperatureFieldObjective<dim>::parse_parameters (ParameterHandler &prm)
+    {
+      prm.enter_subsection ("Adjoint");
+      {
+        prm.enter_subsection ("Temperature field");
+        {
+          coordinate_system =
+            Utilities::Coordinates::string_to_coordinate_system(prm.get ("Coordinate system"));
+
+          prm.enter_subsection ("Target function");
+          {
+            try
+              {
+                target_temperature_function.parse_parameters(prm);
+              }
+            catch (...)
+              {
+                std::cerr << "ERROR: FunctionParser failed to parse\n"
+                          << "\t'Adjoint.Temperature field.Target function'\n"
+                          << "with expression\n"
+                          << "\t'" << prm.get ("Function expression") << "'"
+                          << "More information about the cause of the parse error \n"
+                          << "is shown below.\n";
+                throw;
+              }
+          }
+          prm.leave_subsection();
+
+          prm.enter_subsection ("Weight function");
+          {
+            try
+              {
+                weight_function.parse_parameters(prm);
+              }
+            catch (...)
+              {
+                std::cerr << "ERROR: FunctionParser failed to parse\n"
+                          << "\t'Adjoint.Temperature field.Weight function'\n"
+                          << "with expression\n"
+                          << "\t'" << prm.get ("Function expression") << "'"
+                          << "More information about the cause of the parse error \n"
+                          << "is shown below.\n";
+                throw;
+              }
+          }
+          prm.leave_subsection();
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+
+
+
+    ASPECT_REGISTER_ADJOINT_OBJECTIVE(TemperatureFieldObjective,
+                                      "temperature field",
+                                      "Terminal temperature-field misfit objective for "
+                                      "the time-dependent temperature adjoint workflow.")
+  }
+}
+
+========================================================================================
+// END FILE: source/adjoint/objective/temperature_field_objective.cc
+========================================================================================

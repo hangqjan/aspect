@@ -1,0 +1,13 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_validation_direct.prm
+
+set Output directory = output-adjoint-mpi-m3-payload-failure
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Output MPI adjoint memory diagnostics = true
+    set Checkpoint transaction failure injection = after rank-local checkpoint payload writing
+    set Checkpoint transaction failure rank = 1
+    set Checkpoint transaction failure next reverse step = 10
+  end
+end

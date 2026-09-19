@@ -1,0 +1,3 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5_restart_inside_stop.prm
+
+set Output directory = output-adjoint-sparse-replay-k5-restart-inside-mpi

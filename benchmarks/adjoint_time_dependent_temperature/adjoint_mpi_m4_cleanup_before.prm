@@ -1,0 +1,11 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_m4_stop.prm
+set Output directory = output-adjoint-mpi-m4-cleanup-before
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+    set Trajectory cleanup failure injection = before cleanup starts
+    set Trajectory cleanup failure rank = 1
+    set Trajectory cleanup failure next reverse step = 10
+  end
+end

@@ -1,0 +1,15 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_direct_baseline.prm
+
+set Output directory = output-adjoint-mpi-validation-direct
+
+subsection Checkpointing
+  set Steps between checkpoint = 1
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = keep
+    set Adjoint checkpoint interval = 5
+  end
+end

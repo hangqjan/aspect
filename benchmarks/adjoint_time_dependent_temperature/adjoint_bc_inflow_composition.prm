@@ -1,0 +1,38 @@
+# EXPECTED FAILURE / unsupported v1 diagnostic. The bottom is a persistent
+# inflow with C_D(t)=0.5+0.1 sin(2 pi t), so u.n != 0 and composition Dirichlet
+# data depend on the inflow set. The snapshot correctly replays the accepted
+# constraint graph, but the advection transpose boundary term is intentionally
+# outside Boundary Conditions v1. The runtime guard must reject this input.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_composition_objective_no_av.prm
+
+set Output directory = output-adjoint-bc-inflow-composition
+set Maximum time step = 0.01
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run transposed advection constraint test = true
+  end
+end
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = left, right, top
+  set Prescribed velocity boundary indicators = bottom: function
+
+  subsection Function
+    set Variable names = x, y, t
+    set Function expression = 0; 0.01
+  end
+end
+
+subsection Boundary composition model
+  set Fixed composition boundary indicators = bottom
+  set Allow fixed composition on outflow boundaries = false
+  set List of model names = function
+
+  subsection Function
+    set Variable names = x, y, t
+    set Function expression = 0.5 + 0.1*sin(2*pi*t)
+  end
+end

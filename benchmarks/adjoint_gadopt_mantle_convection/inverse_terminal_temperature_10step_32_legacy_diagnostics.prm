@@ -1,0 +1,29 @@
+# Compatibility input for regenerating the archived 12-iteration synthetic
+# twin inversion with /private/tmp/aspect-td-gadopt-diagnostics.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/reference_forward_32_legacy_diagnostics.prm
+
+set Output directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/output-adjoint-gadopt-inverse-terminal-10step-32
+
+subsection Termination criteria
+  set End step = 10
+end
+
+subsection Adjoint
+  set Solve mode = optimize
+
+  subsection Optimization
+    set Maximum iterations                = 12
+    set Initial trust-region radius       = 1e-3
+    set L-BFGS history size               = 3
+    set Use physical temperature bounds   = true
+    set Diagnostics enabled               = true
+    set Diagnostics directory             = diagnostics
+    set Truth T70 CSV                     = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/output-adjoint-gadopt-reference-32/diagnostics/reference_T70.csv
+    set Observation T80 CSV               = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/output-adjoint-gadopt-reference-32/diagnostics/reference_T80.csv
+  end
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization, adjoint optimization statistics
+end

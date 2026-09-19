@@ -1,0 +1,11 @@
+# Direct-Stokes control: isolates checkpoint and rolling reverse-state logic
+# from the matrix-free GMG cold-rebuild path.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_baseline.prm
+
+set Output directory = output-adjoint-restart-r0-direct-baseline
+
+subsection Solver parameters
+  subsection Stokes solver parameters
+    set Use direct solver for Stokes system = true
+  end
+end

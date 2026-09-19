@@ -1,0 +1,15 @@
+# Temperature-control benchmark for rho(T) in the direct temperature material
+# prefactor path. Thermal conductivity is large enough for physical diffusion
+# to dominate the entropy-viscosity branch in this small one-step setup.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature.prm
+
+set Output directory = output-adjoint-temperature-rho-t-direct
+
+subsection Material model
+  subsection Simple model
+    set Thermal conductivity = 1
+    set Thermal expansion coefficient = 1e-3
+    set Reference specific heat = 1
+  end
+end

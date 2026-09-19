@@ -1,0 +1,4 @@
+# Two-rank dense baseline corresponding to adjoint_sparse_replay_k5_mpi.prm.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k1.prm
+
+set Output directory = output-adjoint-sparse-replay-k1-mpi

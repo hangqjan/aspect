@@ -1,0 +1,11 @@
+# Default composition no-flux regression: no fixed-composition boundary is
+# present, so the adjoint must receive no essential composition constraint and
+# no hand-written boundary-flux contribution.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition_coupled_no_av.prm
+
+set Output directory = output-adjoint-bc-zero-flux-composition
+
+subsection Boundary composition model
+  set Fixed composition boundary indicators =
+end

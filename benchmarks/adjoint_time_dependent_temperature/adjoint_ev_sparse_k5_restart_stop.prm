@@ -1,0 +1,18 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_ev_sparse_k5.prm
+
+set Output directory = output-adjoint-ev-sparse-k5-restart
+
+subsection Checkpointing
+  set Steps between checkpoint = 1
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Adjoint checkpoint interval = 1
+  end
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = 5
+  end
+end

@@ -1,0 +1,3 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_validation_direct.prm
+
+set Output directory = output-adjoint-serial-validation-direct

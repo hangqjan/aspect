@@ -1,0 +1,64 @@
+# Eta-only temperature-control benchmark for T -> eta(T) -> Stokes -> T objective.
+# Temperature does not affect density or cp; a fixed compositional density
+# contrast provides the background flow whose viscosity sensitivity is tested.
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/plugin/libadjoint_material_model.so
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition_coupled_no_av.prm
+
+set Output directory = output-adjoint-temperature-eta-t-stokes-no-av
+
+subsection Solver parameters
+  subsection Stokes solver parameters
+    set Use direct solver for Stokes system = true
+  end
+end
+
+subsection Initial temperature model
+  subsection Function
+    set Function constants = eps=0
+    set Variable names = x,y
+    set Function expression = 0.5 + 0.15 * sin(pi*x) * sin(pi*y) + eps * sin(2*pi*x) * sin(pi*y)
+  end
+end
+
+subsection Initial composition model
+  subsection Function
+    set Function constants = asym=1e-3
+    set Variable names = x,y
+    set Function expression = 0.35 + 0.2 * cos(pi*x) * sin(pi*y) + asym * x * y * (1-y)
+  end
+end
+
+subsection Adjoint
+
+  subsection Temperature field
+    subsection Target function
+      set Variable names = x,y
+      set Function expression = 0.42 + 0.11*x + 0.07*y + 0.03*sin(pi*x)
+    end
+  end
+
+  subsection Diagnostics
+    set Run direct Stokes viscosity derivative test = true
+    set Direct Stokes viscosity derivative test epsilon = 1e-7
+  end
+end
+
+subsection Material model
+  set Model name = adjoint material model
+  set Material averaging = none
+
+  subsection Adjoint material model
+    set Reference density = 1
+    set Reference specific heat = 1
+    set Reference temperature = 0
+    set Thermal expansion coefficient = 0
+    set Specific heat temperature coefficient = 0
+    set Density differential for compositional field 1 = 0.3
+    set Viscosity = 0.02
+    set Viscosity temperature coefficient = 2
+    set Viscosity composition coefficient = 0
+    set Thermal conductivity = 1e-6
+  end
+end

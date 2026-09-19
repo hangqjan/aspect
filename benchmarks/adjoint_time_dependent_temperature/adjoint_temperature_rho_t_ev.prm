@@ -1,0 +1,13 @@
+# Temperature-control benchmark for rho(T) through the active temperature
+# entropy-viscosity material-prefactor paths.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_advection_dominated.prm
+
+set Output directory = output-adjoint-temperature-rho-t-ev
+
+subsection Material model
+  subsection Simple model
+    set Thermal expansion coefficient = 1e-3
+    set Reference specific heat = 1
+  end
+end

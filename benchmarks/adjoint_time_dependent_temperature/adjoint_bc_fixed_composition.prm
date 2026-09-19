@@ -1,0 +1,17 @@
+# Continuous-composition Dirichlet regression. Both horizontal boundaries use
+# the deliberately nonzero forward value C_D=0.7; the reverse constraint graph
+# is replayed with zero inhomogeneities.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition_coupled_no_av.prm
+
+set Output directory = output-adjoint-bc-fixed-composition
+
+subsection Boundary composition model
+  set Fixed composition boundary indicators = bottom, top
+  set List of model names = function
+
+  subsection Function
+    set Variable names = x, y, t
+    set Function expression = 0.7
+  end
+end
