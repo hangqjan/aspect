@@ -1,0 +1,16 @@
+# Stop before reverse step 13. q_12 belongs to the [10,15] interval, so a
+# restart must select anchor 10 rather than either neighbouring anchor.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5_restart_baseline.prm
+
+set Output directory = output-adjoint-sparse-replay-k5-restart-inside
+
+subsection Checkpointing
+  set Steps between checkpoint = 1
+end
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = 13
+  end
+end

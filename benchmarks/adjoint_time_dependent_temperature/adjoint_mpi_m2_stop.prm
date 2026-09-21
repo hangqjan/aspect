@@ -1,0 +1,11 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_validation_direct.prm
+
+set Output directory = output-adjoint-mpi-restart-m2
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Output MPI adjoint memory diagnostics = true
+    set Stop after adjoint checkpoint = 10
+  end
+end

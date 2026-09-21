@@ -1,0 +1,10 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_lifecycle_direct_safe_baseline.prm
+
+set Output directory = output-adjoint-lifecycle-direct-failure-after-cleanup
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Lifecycle failure injection = after cleanup
+  end
+end

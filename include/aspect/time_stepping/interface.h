@@ -173,6 +173,16 @@ namespace aspect
         bool should_simulation_terminate_now() const;
 
         /**
+         * Reset runtime-only decisions after a Simulator state has been
+         * restored for a new in-memory evaluation. This deliberately does not
+         * attempt to reset time-stepping plugins: callers must reject mutable
+         * plugin configurations unless those plugins provide their own reset
+         * contract. The built-in constant/function time-step model is safe
+         * because execute() derives its result solely from restored time.
+         */
+        void reset_runtime_state_for_new_evaluation();
+
+        /**
          * Declare the parameters of all known termination criteria plugins,
          * as well as of ones this class has itself.
          */

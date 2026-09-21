@@ -490,7 +490,10 @@ namespace aspect
                                  Assemblers::n_interface_matrices<dim>(finite_element.reference_cell())
                                  :
                                  0),
-                                std::vector<types::global_dof_index>(finite_element.dofs_per_cell))
+                                std::vector<types::global_dof_index>(finite_element.dofs_per_cell)),
+          active_cell_index(numbers::invalid_unsigned_int),
+          minimum_physical_diffusion(numbers::signaling_nan<double>()),
+          maximum_physical_diffusion(numbers::signaling_nan<double>())
         {}
 
       }

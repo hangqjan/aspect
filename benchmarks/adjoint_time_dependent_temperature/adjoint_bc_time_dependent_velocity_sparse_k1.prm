@@ -1,0 +1,22 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_bc_time_dependent_velocity.prm
+
+set Output directory = output-adjoint-bc-time-dependent-velocity-sparse-k1
+
+subsection Termination criteria
+  set End step = 6
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory anchor spacing = 1
+    set Trajectory cleanup policy = keep
+    set Trajectory storage mode = stokes cached
+  end
+end
+
+subsection Solver parameters
+  subsection Stokes solver parameters
+    set Use direct solver for Stokes system = true
+  end
+end

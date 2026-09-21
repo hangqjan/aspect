@@ -1,0 +1,46 @@
+# Terminal composition-field objective benchmark with active entropy-viscosity.
+# This isolates the strict composition advection/artificial-viscosity transpose
+# by observing C_final directly.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_composition_objective_no_av.prm
+
+set Output directory = output-adjoint-time-dependent-composition-objective-av
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run artificial viscosity coefficient seed test = true
+    set Artificial viscosity coefficient seed test epsilon = 1e-7
+    set Run artificial viscosity estimator transpose test = true
+    set Artificial viscosity estimator transpose test epsilon = 1e-11
+    set Run local entropy residual transpose test = true
+    set Local entropy residual transpose test epsilon = 1e-11
+    set Run global entropy denominator scalar test = true
+    set Global entropy denominator scalar test epsilon = 1e-8
+    set Run global entropy variation transpose test = true
+    set Global entropy variation transpose test epsilon = 1e-8
+  end
+end
+
+subsection Initial temperature model
+  subsection Function
+    set Function constants = asym=1e-3
+    set Variable names = x,y
+    set Function expression = 0.5 + 0.1 * sin(pi*x) * sin(pi*y) + asym * x * y * (1-y)
+  end
+end
+
+subsection Initial composition model
+  subsection Function
+    set Function constants = eps=0, asym=1e-3
+    set Variable names = x,y
+    set Function expression = 0.35 + 0.1 * cos(pi*x) * sin(pi*y) + asym * x * y * (1-y) + eps * sin(2*pi*x) * sin(pi*y)
+  end
+end
+
+subsection Discretization
+  subsection Stabilization parameters
+    set cR   = 1, 1
+    set beta = 0.5, 0.5
+  end
+end

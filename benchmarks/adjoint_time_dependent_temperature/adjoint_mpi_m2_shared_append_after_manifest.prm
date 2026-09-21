@@ -1,0 +1,17 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_m2_baseline.prm
+
+set Output directory = output-adjoint-mpi-shared-append-after-manifest
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = keep
+    set Trajectory records per segment = 4
+  end
+
+  subsection Diagnostics
+    set Trajectory append failure injection = after manifest publication
+    set Trajectory append failure rank = 0
+    set Trajectory append failure step = 6
+  end
+end

@@ -18,8 +18,8 @@
   <http://www.gnu.org/licenses/>.
 */
 
-#include <aspect/adjoint/manager.h>
-#include <aspect/adjoint/kernel_calculator.h>
+#include <aspect/adjoint/core/manager.h>
+#include <aspect/adjoint/core/kernel_calculator.h>
 #include <aspect/postprocess/adjoint_kernels.h>
 
 #include <fstream>

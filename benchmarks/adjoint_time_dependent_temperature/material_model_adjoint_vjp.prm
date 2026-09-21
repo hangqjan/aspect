@@ -1,0 +1,16 @@
+# Standalone MaterialModelAdjoint VJP diagnostic for the simple material model.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition_real_density_av.prm
+
+set Output directory = output-material-model-adjoint-vjp
+
+subsection Termination criteria
+  set End step = 1
+end
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run material model adjoint VJP test = true
+  end
+end

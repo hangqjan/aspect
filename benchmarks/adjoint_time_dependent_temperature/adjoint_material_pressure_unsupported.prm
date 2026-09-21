@@ -1,0 +1,28 @@
+# Expected-failure benchmark for v1 MaterialModelAdjoint pressure safety.
+# The material model generates bar_p through pressure-dependent density in the
+# temperature material-prefactor path; pressure scattering is intentionally
+# unsupported in v1.
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/plugin/libadjoint_material_model.so
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature.prm
+
+set Output directory = output-adjoint-material-pressure-unsupported
+
+subsection Formulation
+  set Formulation = custom
+  set Mass conservation = incompressible
+  set Temperature equation = real density
+end
+
+subsection Material model
+  set Model name = adjoint pressure material model
+
+  subsection Adjoint pressure material model
+    set Reference density = 1
+    set Reference specific heat = 1
+    set Pressure density coefficient = 1e-6
+    set Viscosity = 1
+    set Thermal conductivity = 1e-6
+  end
+end

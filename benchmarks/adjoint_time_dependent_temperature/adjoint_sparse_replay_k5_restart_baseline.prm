@@ -1,0 +1,18 @@
+# Phase-C uninterrupted sparse reference: K=5 with durable checkpoints and
+# anchor-aware cleanup enabled.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_k5.prm
+
+set Output directory = output-adjoint-sparse-replay-k5-restart-baseline
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = safe incremental
+    set Adjoint checkpoint interval = 1
+  end
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+    set Run sparse trajectory replay validation = false
+  end
+end

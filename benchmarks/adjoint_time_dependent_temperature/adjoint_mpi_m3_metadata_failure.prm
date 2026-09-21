@@ -1,0 +1,10 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_validation_direct.prm
+set Output directory = output-adjoint-mpi-m3-metadata-failure
+subsection Adjoint
+
+  subsection Diagnostics
+    set Checkpoint transaction failure injection = after checkpoint metadata publication
+    set Checkpoint transaction failure rank = 1
+    set Checkpoint transaction failure next reverse step = 10
+  end
+end

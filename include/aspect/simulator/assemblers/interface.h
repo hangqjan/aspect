@@ -476,6 +476,15 @@ namespace aspect
            * and has size zero if in the continuous Galerkin case.
            */
           std::vector<std::vector<types::global_dof_index>>   neighbor_dof_indices;
+
+          /**
+           * Active cell index and physical diffusion bounds from this local
+           * advection assembly. They are used by adjoint code to recover the
+           * active branch of max(k, artificial_viscosity).
+           */
+          unsigned int              active_cell_index;
+          double                    minimum_physical_diffusion;
+          double                    maximum_physical_diffusion;
         };
       }
     }

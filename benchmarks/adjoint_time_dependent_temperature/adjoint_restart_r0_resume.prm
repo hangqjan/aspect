@@ -1,0 +1,17 @@
+# Continue the committed R0 reverse checkpoint. ASPECT restores the ordinary
+# terminal forward checkpoint only to rebuild the fixed mesh/DoF context; the
+# adjoint manager then restores its independent reverse checkpoint.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_stop.prm
+
+set Resume computation = auto
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Adjoint checkpoint interval = 1
+  end
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+  end
+end

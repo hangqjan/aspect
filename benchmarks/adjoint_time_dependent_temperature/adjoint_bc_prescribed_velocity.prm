@@ -1,0 +1,19 @@
+# Nonzero, component-wise prescribed tangential velocity on the top boundary.
+# The bottom is no slip and the side walls retain free slip. In the reverse
+# solve the stored constraint graph is homogenized, so the top x component is
+# zero for the adjoint even though the forward value is nonzero.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature.prm
+
+set Output directory = output-adjoint-bc-prescribed-velocity
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = left, right
+  set Zero velocity boundary indicators = bottom
+  set Prescribed velocity boundary indicators = top x: function
+
+  subsection Function
+    set Variable names = x, y, t
+    set Function expression = 0.1; 0
+  end
+end

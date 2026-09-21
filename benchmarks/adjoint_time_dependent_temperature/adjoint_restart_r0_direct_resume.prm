@@ -1,0 +1,11 @@
+# Resume the interrupted direct-Stokes reverse sweep above.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_direct_stop.prm
+
+set Resume computation = auto
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+  end
+end

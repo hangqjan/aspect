@@ -1,0 +1,13 @@
+# T+C benchmark for validating the composition adjoint without active
+# artificial-viscosity derivatives.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition.prm
+
+set Output directory = output-adjoint-time-dependent-temperature-composition-no-av
+
+subsection Discretization
+  subsection Stabilization parameters
+    set cR = 0, 0
+    set beta = 0, 0
+  end
+end

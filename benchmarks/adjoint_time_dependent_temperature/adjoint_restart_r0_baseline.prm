@@ -1,0 +1,23 @@
+# Uninterrupted serial R0 reference for the checkpoint/resume comparison.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/trajectory_archive_benchmark.prm
+
+set Output directory = output-adjoint-restart-r0-baseline
+
+subsection Solver parameters
+  subsection Matrix Free
+    set Output cold rebuild diagnostics = true
+  end
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = keep
+    set Adjoint checkpoint interval = 1
+  end
+
+  subsection Diagnostics
+    set Stop after adjoint checkpoint = -1
+    set Run trajectory Stokes recovery diagnostic = false
+  end
+end

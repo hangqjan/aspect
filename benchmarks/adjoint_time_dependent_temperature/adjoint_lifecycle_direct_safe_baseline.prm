@@ -1,0 +1,15 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_direct_baseline.prm
+
+set Output directory = output-adjoint-lifecycle-direct-safe-baseline
+
+subsection Checkpointing
+  set Steps between checkpoint = 1
+end
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = safe incremental
+    set Adjoint checkpoint interval = 5
+  end
+end

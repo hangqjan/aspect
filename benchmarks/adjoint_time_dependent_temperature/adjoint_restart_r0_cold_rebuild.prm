@@ -1,0 +1,12 @@
+# Targeted A/B test: reset GMG state before the first reverse Stokes solve in
+# an otherwise uninterrupted trajectory run.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_baseline.prm
+
+set Output directory = output-adjoint-restart-r0-cold-rebuild
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run matrix-free cold rebuild diagnostic = true
+  end
+end

@@ -1,0 +1,13 @@
+# T+C benchmark variant for isolating active artificial viscosity in the
+# composition equation while keeping the temperature equation physical-diffusion
+# dominated.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature_composition.prm
+
+set Output directory = output-adjoint-time-dependent-temperature-composition-only-av
+
+subsection Material model
+  subsection Simple model
+    set Thermal conductivity = 1
+  end
+end

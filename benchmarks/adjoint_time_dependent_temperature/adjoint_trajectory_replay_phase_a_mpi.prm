@@ -1,0 +1,13 @@
+# Same-rank MPI counterpart of the Phase-A accepted-step replay validation.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_trajectory_replay_phase_a.prm
+
+set Output directory = output-adjoint-trajectory-replay-phase-a-mpi
+
+subsection Adjoint
+  # The inherited Stokes-recovery diagnostic is serial-only. Phase A validates
+  # the accepted-step replay primitive directly against the full archive.
+
+  subsection Diagnostics
+    set Run trajectory Stokes recovery diagnostic = false
+  end
+end

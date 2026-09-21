@@ -1,0 +1,17 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_sparse_replay_gmg_k1.prm
+
+set Output directory = output-adjoint-sparse-replay-gmg-k5
+
+subsection Adjoint
+  # GMG rebuilds are algebraically equivalent but retain ~3e-11 relative
+  # velocity variation from the iterative preconditioner path.
+
+  subsection Time dependent
+    set Trajectory anchor spacing = 5
+  end
+
+  subsection Diagnostics
+    set Run sparse trajectory replay validation = true
+    set Trajectory replay tolerance = 1e-10
+  end
+end

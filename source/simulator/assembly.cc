@@ -1059,6 +1059,27 @@ namespace aspect
                                    scratch.material_model_outputs,
                                    scratch.heating_model_outputs);
 
+    if (advection_field.is_temperature())
+      {
+        double minimum_physical_diffusion = std::numeric_limits<double>::max();
+        double maximum_physical_diffusion = 0.0;
+        for (const double conductivity : scratch.material_model_outputs.thermal_conductivities)
+          {
+            minimum_physical_diffusion = std::min(minimum_physical_diffusion, conductivity);
+            maximum_physical_diffusion = std::max(maximum_physical_diffusion, conductivity);
+          }
+
+        data.minimum_physical_diffusion = minimum_physical_diffusion;
+        data.maximum_physical_diffusion = maximum_physical_diffusion;
+      }
+    else
+      {
+        data.minimum_physical_diffusion = 0.0;
+        data.maximum_physical_diffusion = 0.0;
+      }
+
+    data.active_cell_index = cell->active_cell_index();
+
     // TODO: Compute artificial viscosity once per timestep instead of each time
     // temperature system is assembled (as this might happen more than once per
     // timestep for iterative solvers)
@@ -1185,6 +1206,14 @@ namespace aspect
   copy_local_to_global_advection_system (const AdvectionField &advection_field,
                                          const internal::Assembly::CopyData::AdvectionSystem<dim> &data)
   {
+    if (data.active_cell_index != numbers::invalid_unsigned_int)
+      {
+        last_advection_physical_diffusion_min_per_cell[data.active_cell_index] =
+          data.minimum_physical_diffusion;
+        last_advection_physical_diffusion_max_per_cell[data.active_cell_index] =
+          data.maximum_physical_diffusion;
+      }
+
     // copy entries into the global matrix. note that these local contributions
     // only correspond to the advection dofs, as assembled above
     current_constraints.distribute_local_to_global (data.local_matrix,
@@ -1255,6 +1284,11 @@ namespace aspect
     Vector<double> viscosity_per_cell;
     viscosity_per_cell.reinit(triangulation.n_active_cells());
     get_artificial_viscosity(viscosity_per_cell, advection_field);
+    last_advection_artificial_viscosity_per_cell = viscosity_per_cell;
+    last_advection_physical_diffusion_min_per_cell.reinit(triangulation.n_active_cells());
+    last_advection_physical_diffusion_max_per_cell.reinit(triangulation.n_active_cells());
+    last_advection_physical_diffusion_min_per_cell = 0.0;
+    last_advection_physical_diffusion_max_per_cell = 0.0;
 
     // We have to assemble the term u.grad phi_i * phi_j, which is
     // of total polynomial degree

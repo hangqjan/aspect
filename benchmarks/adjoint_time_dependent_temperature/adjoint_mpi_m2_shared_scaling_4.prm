@@ -1,0 +1,16 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_mpi_m2_baseline.prm
+
+set End time = 10.0
+set Output directory = output-adjoint-mpi-shared-scaling-4
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = keep
+    set Trajectory records per segment = 4
+  end
+end
+
+subsection Termination criteria
+  set End step = 1000
+end

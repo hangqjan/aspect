@@ -1,0 +1,4 @@
+# Shared-MPI trajectory backend: serial, direct-Stokes smoke/regression input.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_restart_r0_direct_baseline.prm
+
+set Output directory = output-adjoint-shared-trajectory-serial

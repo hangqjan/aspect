@@ -1,0 +1,26 @@
+# Phase-A deterministic accepted-step replay validation. The full trajectory
+# remains the reference; no sparse anchors or reverse changes are enabled.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/trajectory_archive_benchmark.prm
+
+set Output directory = output-adjoint-trajectory-replay-phase-a
+
+subsection Adjoint
+
+  subsection Time dependent
+    set Trajectory cleanup policy = keep
+  end
+
+  subsection Diagnostics
+    set Run trajectory replay diagnostic = true
+  end
+end
+
+subsection Termination criteria
+  set End step = 3
+end
+
+subsection Solver parameters
+  subsection Stokes solver parameters
+    set Use direct solver for Stokes system = true
+  end
+end

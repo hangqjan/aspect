@@ -1,0 +1,29 @@
+# Mixed thermal-boundary regression for the time-dependent adjoint: fixed
+# temperature at the top and a state-independent, nonzero conductive heat
+# flux at the impermeable bottom. The inherited velocity boundaries are free
+# slip, so this exercises the discrete natural boundary path without adding
+# an adjoint temperature Dirichlet constraint at the flux boundary.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_time_dependent_temperature.prm
+
+set Output directory = output-adjoint-bc-fixed-heat-flux
+
+subsection Adjoint
+
+  subsection Diagnostics
+    set Run transposed advection constraint test = true
+  end
+end
+
+subsection Boundary temperature model
+  set Fixed temperature boundary indicators = top
+end
+
+subsection Boundary heat flux model
+  set Fixed heat flux boundary indicators = bottom
+  set Model name = function
+
+  subsection Function
+    set Function expression = -0.02
+  end
+end

@@ -1,0 +1,11 @@
+# Zero-flux counterpart of adjoint_bc_fixed_heat_flux.prm.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_time_dependent_temperature/adjoint_bc_fixed_heat_flux.prm
+
+set Output directory = output-adjoint-bc-insulating
+
+subsection Boundary heat flux model
+  subsection Function
+    set Function expression = 0
+  end
+end
