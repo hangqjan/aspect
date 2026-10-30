@@ -1,0 +1,11 @@
+# Realized-mesh smoke. The derivative is evaluated on the resulting mesh; it
+# does not differentiate the initial refinement selection.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/sg2_mixed.prm
+
+set Output directory = output-adjoint-geoid-sg4-amr-smoke
+
+subsection Mesh refinement
+  set Initial adaptive refinement = 1
+  set Minimum refinement level = 1
+  set Coarsening fraction = 0
+end

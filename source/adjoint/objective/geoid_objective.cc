@@ -38,6 +38,15 @@ namespace aspect
   namespace Adjoint
   {
     template <int dim>
+    void GeoidObjective<dim>::initialize_simulator(const Simulator<dim> &simulator)
+    {
+      Objective::Interface<dim>::initialize_simulator(simulator);
+      observation.initialize_simulator(simulator);
+    }
+
+
+
+    template <int dim>
     std::pair<double, double>
     GeoidObjective<dim>::operator_context() const
     {
@@ -290,6 +299,11 @@ namespace aspect
     GeoidObjective<dim>::coefficient_seed() const
     {
       Postprocess::SphericalHarmonicCoefficients coefficients = forward_coefficients();
+      if (use_file_observation)
+        {
+          observation.initialize(minimum_degree, maximum_degree);
+          observed_coefficients = observation.coefficients();
+        }
       // For
       //   J = 1/2 sum_lm w_lm[(C-Cobs)^2+(S-Sobs)^2],
       // the spectral covector is w_lm times the coefficient residual. Reusing
@@ -314,6 +328,11 @@ namespace aspect
     GeoidObjective<dim>::evaluate() const
     {
       const Postprocess::SphericalHarmonicCoefficients coefficients = forward_coefficients();
+      if (use_file_observation)
+        {
+          observation.initialize(minimum_degree, maximum_degree);
+          observed_coefficients = observation.coefficients();
+        }
       double objective = 0.0;
       // Cosine and sine coefficients are independent real degrees of freedom
       // under this normalization. Accumulate their weighted Euclidean
@@ -466,6 +485,13 @@ namespace aspect
                             "Comma-separated observed cosine coefficients in shared degree-major order.");
           prm.declare_entry("Observed sine coefficients", "", Patterns::Anything(),
                             "Comma-separated observed sine coefficients in shared degree-major order.");
+          prm.declare_entry("Observation source", "inline", Patterns::Selection("inline|file"),
+                            "Use inline coefficient lists or a cached coefficient-file observation.");
+          prm.enter_subsection("Observation");
+          {
+            Observation::SphericalHarmonicObservation<dim>::declare_parameters(prm);
+          }
+          prm.leave_subsection();
           prm.declare_entry("Coefficient weights", "", Patterns::Anything(),
                             "Optional comma-separated nonnegative diagonal weights. One weight applies to both "
                             "cosine and sine components of each degree/order; an empty list means all weights are one.");
@@ -495,6 +521,7 @@ namespace aspect
         {
           minimum_degree = prm.get_integer("Minimum spherical harmonic degree");
           maximum_degree = prm.get_integer("Maximum spherical harmonic degree");
+          use_file_observation = prm.get("Observation source") == "file";
           include_surface_topography = prm.get_bool("Include surface dynamic topography contribution");
           density_above = prm.get_double("Surface density above");
           include_cmb_topography = prm.get_bool("Include CMB dynamic topography contribution");
@@ -506,18 +533,30 @@ namespace aspect
                                                                   maximum_degree);
           const unsigned int coefficient_count = layout.size();
 
-          const std::vector<double> observed_cosine = Utilities::string_to_double(
-                                                        Utilities::split_string_list(
-                                                          prm.get("Observed cosine coefficients")));
-          const std::vector<double> observed_sine = Utilities::string_to_double(
-                                                      Utilities::split_string_list(
-                                                        prm.get("Observed sine coefficients")));
-          AssertThrow(observed_cosine.size() == coefficient_count
-                      && observed_sine.size() == coefficient_count,
-                      ExcMessage("Observed geoid cosine and sine coefficient lists must each contain exactly "
-                                 + std::to_string(coefficient_count) + " entries."));
-          observed_coefficients.reinit(minimum_degree, maximum_degree);
-          observed_coefficients.set_coefficients(observed_cosine, observed_sine);
+          if (use_file_observation)
+            {
+              prm.enter_subsection("Observation");
+              {
+                observation.parse_parameters(prm);
+              }
+              prm.leave_subsection();
+              observed_coefficients.reinit(minimum_degree, maximum_degree);
+            }
+          else
+            {
+              const std::vector<double> observed_cosine = Utilities::string_to_double(
+                                                            Utilities::split_string_list(
+                                                              prm.get("Observed cosine coefficients")));
+              const std::vector<double> observed_sine = Utilities::string_to_double(
+                                                          Utilities::split_string_list(
+                                                            prm.get("Observed sine coefficients")));
+              AssertThrow(observed_cosine.size() == coefficient_count
+                          && observed_sine.size() == coefficient_count,
+                          ExcMessage("Observed geoid cosine and sine coefficient lists must each contain exactly "
+                                     + std::to_string(coefficient_count) + " entries."));
+              observed_coefficients.reinit(minimum_degree, maximum_degree);
+              observed_coefficients.set_coefficients(observed_cosine, observed_sine);
+            }
 
           const std::string weight_string = prm.get("Coefficient weights");
           if (weight_string.empty())

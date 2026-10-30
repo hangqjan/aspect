@@ -1,0 +1,11 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/inverse_refinement_2_base.prm
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/generated_self_gravitating_geoid_observation_refinement_2.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-2/inverse-geoid
+
+subsection Adjoint
+  set List of objectives = self-gravitating geoid
+  subsection Self-gravitating geoid
+    set Field weights = 0, 0, 1e20, 1e20
+  end
+end

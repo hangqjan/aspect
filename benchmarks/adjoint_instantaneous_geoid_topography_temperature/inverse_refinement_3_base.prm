@@ -1,0 +1,29 @@
+# Shared background-only inverse on the same fixed refinement-3 mesh as the
+# reference. Leaf inputs select their observation functional(s).
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/reference_refinement_3.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-3/inverse-base
+
+subsection Initial temperature model
+  set Model name = function
+  subsection Function
+    set Variable names = x,y,z
+    set Function expression = 1600
+  end
+end
+
+subsection Adjoint
+  set Solve mode = optimize
+  subsection Optimization
+    set Control field = temperature
+    set Maximum iterations = 12
+    set Gradient tolerance = 1e-14
+    set Step tolerance = 1e-12
+    set Initial trust-region radius = 1e12
+    set L-BFGS history size = 3
+    set Lower bound = -200
+    set Upper bound = 200
+    set Output accepted controls = true
+    set Use physical temperature bounds = false
+  end
+end

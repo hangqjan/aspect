@@ -88,6 +88,25 @@ New code belongs in the directory that owns its abstraction rather than in the
 top-level `adjoint` directory. This keeps include paths descriptive and avoids
 turning the facade into a dependency hub.
 
+## Observation representations and sources
+
+An observation is target data; an objective owns the physical quantity, the
+misfit, and the adjoint seed. The observation layer consequently distinguishes
+the mathematical representation from the data source used to obtain it. The
+current terminal temperature and composition objectives use
+`Observation::FullFieldObservation`: a scalar target defined over the model
+volume. Its supported sources are an analytic function, a structured data
+file, and the same-layout in-memory state used by synthetic tests. The latter
+is an implementation route for a single running simulation, not a portable
+cross-run file format.
+
+`TerminalScalarFieldMisfit` selects temperature or the requested composition
+field and supplies the volume-L2 objective. `FullFieldObservation` neither
+selects a physical quantity nor assembles finite-element right hand sides.
+This separation leaves room for independent surface-field and
+spherical-harmonic observation representations without treating functions,
+files, and physical observables as peer concepts.
+
 ## Objective capability model
 
 All objective types live under `Adjoint::Objective` and implement the small
@@ -325,6 +344,56 @@ stricter.
 Scientific changes suspected during refactoring must be recorded as separate
 issues and are not folded into the cleanup. Verification results are appended
 to this document only after the corresponding build or test completes.
+
+## Surface and spectral observations
+
+`FullFieldObservation` remains the representation for terminal volume fields.
+`SurfaceFieldObservation` is independent of it: it supplies scalar values on
+a physical boundary and owns only acquisition and interpolation, never an
+adjoint seed. Its file path is therefore shared by the existing
+dynamic-topography surface-L2 objective without changing that objective's CBF
+forward or transpose mathematics. `SphericalHarmonicObservation` similarly
+owns only canonical `(l,m,C,S)` target coefficients; the existing geoid
+coefficient objective retains its established weighted misfit and transpose.
+
+Native surface files are scattered cell-centre samples, not FE nodal data. The
+provider reads them once on every target MPI rank, builds a packed deal.II
+R-tree, and evaluates inverse-distance-squared interpolation over a fixed
+number of neighbours. Cartesian files use Euclidean distance. Spherical files
+are embedded on the unit sphere before the R-tree query and use great-circle
+distance for weighting; this makes longitude wraparound and poles regular.
+The bounded neighbour set is explicitly distance-sorted before evaluation, so
+exact samples and equal-distance ties are deterministic. The provider rejects
+target points whose nearest sample is implausibly distant relative to the
+median sample spacing. These semantics intentionally describe interpolation of
+a sampled surface observable, not exact reconstruction of a reference FE
+field.
+
+The ASPECT-native dynamic-topography adapter accepts the unchanged documented
+`dynamic_topography/dynamic_topography_<boundary>.<step>` files and validates
+their final `dynamic_topography_<boundary>` column. It preserves ASPECT's
+metre and positive-upward convention. The native geoid surface adapter accepts
+the unchanged `geoid/geoid_anomaly.<step>` files in either Cartesian `x y z`
+or geographic `longitude latitude` form. The native geoid harmonic adapter
+accepts the unchanged `geoid_anomaly_SH_coefficients.<step>` table, validates
+every degree/order entry, and assumes ASPECT's existing real fully-normalized
+Dahlen--Tromp convention because old native files do not carry convention or
+radius metadata.
+
+No native dynamic-topography harmonic reader is provided: ASPECT currently
+does not produce a DT coefficient table. A future implementation must either
+apply the canonical existing surface transform to DT samples with reviewed
+sampling semantics, or add a backwards-compatible optional forward output.
+The full-field ASPECT-native observation gate remains **NOT CLOSED**: VTU,
+PVTU, pd2, and restart data are not introduced as production observation
+backends.
+
+On the current macOS/deal.II runtime, rendering a stack trace for an expected
+exception can allocate without bound in `ExceptionBase::print_stack_trace()`.
+Malformed-observation benchmark cases therefore suppress only stack-trace
+rendering through benchmark-local infrastructure; they retain the production
+hard error, diagnostic, and nonzero exit. This is not enabled by normal ASPECT
+execution and is not required on unaffected platforms.
 
 ## Verification record
 

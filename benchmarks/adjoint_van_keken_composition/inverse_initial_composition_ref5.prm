@@ -1,0 +1,16 @@
+# Full smooth-field twin inverse at initial global refinement 5.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_van_keken_composition/inverse_initial_composition.prm
+
+set Output directory = output-adjoint-van-keken-inverse-ref5
+
+subsection Mesh refinement
+  set Initial global refinement = 5
+end
+
+subsection Adjoint
+  subsection Composition field
+    subsection Observation file
+      set Data directory = output-adjoint-van-keken-reference-ref5
+    end
+  end
+end

@@ -43,6 +43,8 @@
 #include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/lac/la_parallel_block_vector.h>
 
+#include <string>
+
 namespace aspect
 {
   namespace internal
@@ -386,6 +388,11 @@ namespace aspect
          */
         void compute_diagonal () override;
 
+        /** Attach runtime-only context to the mass-diagonal diagnostic. */
+        void set_diagnostic_context(const std::string &label,
+                                    const unsigned int level,
+                                    const bool enabled);
+
       private:
 
         /**
@@ -416,6 +423,9 @@ namespace aspect
          * A pointer to the current cell data that contains viscosity and other required parameters per cell.
          */
         const OperatorCellData<dim,number> *cell_data;
+        std::string diagnostic_label;
+        unsigned int diagnostic_level;
+        bool diagnostic_enabled;
     };
 
     /**

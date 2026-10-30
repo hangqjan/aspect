@@ -1,0 +1,92 @@
+# van Keken et al. smooth thermochemical reference forward model.
+#
+# This keeps the physics, geometry, resolution, and duration of the classic
+# cookbook case. Build the benchmark-local shared library first as described
+# in README.md, then run this input serially. Its final chemical field becomes
+# output-adjoint-van-keken-reference/terminal_composition.txt.
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/build-release/van-keken-terminal-composition-plugin/libterminal_composition_observation.release.so
+set Dimension                    = 2
+set Start time                   = 0
+set End time                     = 2000
+set Use years instead of seconds = false
+set CFL number                   = 1.0
+set Output directory             = output-adjoint-van-keken-reference
+
+subsection Geometry model
+  set Model name = box
+  subsection Box
+    set X extent = 0.9142
+    set Y extent = 1.0000
+  end
+end
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = left, right
+  set Zero velocity boundary indicators       = bottom, top
+end
+
+subsection Material model
+  set Model name = simple
+  subsection Simple model
+    set Reference density                         = 1010
+    set Viscosity                                 = 1e2
+    set Thermal expansion coefficient             = 0
+    set Density differential for compositional field 1 = -10
+  end
+end
+
+subsection Gravity model
+  set Model name = vertical
+  subsection Vertical
+    set Magnitude = 10
+  end
+end
+
+subsection Initial temperature model
+  set Model name = function
+  subsection Function
+    set Function expression = 0
+  end
+end
+
+subsection Compositional fields
+  set Number of fields             = 1
+  set Names of fields              = chemical
+  set Types of fields              = chemical composition
+  set Compositional field methods  = field
+end
+
+subsection Initial composition model
+  set Model name = function
+  subsection Function
+    set Variable names     = x,z
+    set Function constants = pi=3.1415926
+    set Function expression = 0.5*(1+tanh((0.2+0.02*cos(pi*x/0.9142)-z)/0.02))
+  end
+end
+
+subsection Mesh refinement
+  set Initial adaptive refinement        = 0
+  set Strategy                           = composition
+  set Initial global refinement          = 7
+  set Time steps between mesh refinement = 0
+  set Coarsening fraction                = 0.05
+  set Refinement fraction                = 0.3
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization, velocity statistics, composition statistics, terminal composition observation
+  subsection Visualization
+    set Output format                 = vtu
+    set Time between graphical output = 100
+  end
+  subsection Terminal composition observation
+    set Composition field name = chemical
+    set Samples in x           = 129
+    set Samples in y           = 129
+    set Box x extent           = 0.9142
+    set Box y extent           = 1.0
+    set Output file name       = terminal_composition.txt
+  end
+end

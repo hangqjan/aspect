@@ -22,6 +22,7 @@
 #define _aspect_adjoint_objective_geoid_objective_h
 
 #include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/adjoint/observation/spherical_harmonic_observation.h>
 #include <aspect/postprocess/geoid_harmonics.h>
 
 namespace aspect
@@ -46,6 +47,8 @@ namespace aspect
 
         void
         parse_parameters (ParameterHandler &prm) override;
+
+        void initialize_simulator(const Simulator<dim> &simulator) override;
 
         double
         evaluate() const override;
@@ -90,7 +93,9 @@ namespace aspect
 
         unsigned int minimum_degree;
         unsigned int maximum_degree;
-        Postprocess::SphericalHarmonicCoefficients observed_coefficients;
+        mutable Postprocess::SphericalHarmonicCoefficients observed_coefficients;
+        mutable Observation::SphericalHarmonicObservation<dim> observation;
+        bool use_file_observation;
         /** One nonnegative diagonal weight per degree/order, shared by cos/sin. */
         std::vector<double> weights;
         bool include_surface_topography;

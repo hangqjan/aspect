@@ -25,6 +25,8 @@
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/fe/fe_values.h>
 
+#include <limits>
+
 namespace aspect
 {
   namespace Postprocess
@@ -160,6 +162,66 @@ namespace aspect
     {
       return bottom_density;
     }
+
+
+
+    template <int dim>
+    Vector<double>
+    compute_boundary_mean_density_transpose(
+      const SimulatorAccess<dim> &access,
+      const BoundaryMeanDensityBoundary boundary,
+      const double scalar_seed)
+    {
+      const Quadrature<dim-1> &face_quadrature = access.introspection().face_quadratures.temperature;
+      FEFaceValues<dim> face_values(access.get_mapping(), access.get_fe(), face_quadrature,
+                                    update_JxW_values);
+      const unsigned int volume_quadrature_degree =
+        access.get_fe().base_element(access.introspection().base_elements.velocities).degree + 1;
+      const QGauss<dim> volume_quadrature(volume_quadrature_degree);
+      FEValues<dim> volume_values(access.get_mapping(), access.get_fe(), volume_quadrature,
+                                  update_JxW_values);
+      const types::boundary_id boundary_id = access.get_geometry_model().
+                                             translate_symbolic_boundary_name_to_id(boundary == BoundaryMeanDensityBoundary::top
+                                                                                    ? "top" : "bottom");
+
+      double local_area = 0.0;
+      for (const auto &cell : access.get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned() && cell->at_boundary())
+          for (const unsigned int face : cell->face_indices())
+            if (cell->at_boundary(face) && cell->face(face)->boundary_id() == boundary_id)
+              {
+                face_values.reinit(cell, face);
+                for (unsigned int q = 0; q < face_quadrature.size(); ++q)
+                  local_area += face_values.JxW(q);
+              }
+      const double area = Utilities::MPI::sum(local_area, access.get_mpi_communicator());
+      AssertThrow(area > std::numeric_limits<double>::min(),
+                  ExcMessage("Boundary mean-density transpose found zero selected-boundary area."));
+
+      Vector<double> result(access.get_triangulation().n_active_cells());
+      for (const auto &cell : access.get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            volume_values.reinit(cell);
+            double cell_volume = 0.0;
+            for (unsigned int q = 0; q < volume_quadrature.size(); ++q)
+              cell_volume += volume_values.JxW(q);
+            AssertThrow(cell_volume > std::numeric_limits<double>::min(),
+                        ExcMessage("Boundary mean-density transpose encountered a locally owned cell with zero volume."));
+
+            double face_integral = 0.0;
+            if (cell->at_boundary())
+              for (const unsigned int face : cell->face_indices())
+                if (cell->at_boundary(face) && cell->face(face)->boundary_id() == boundary_id)
+                  {
+                    face_values.reinit(cell, face);
+                    for (unsigned int q = 0; q < face_quadrature.size(); ++q)
+                      face_integral += face_values.JxW(q);
+                  }
+            result(cell->active_cell_index()) = scalar_seed * face_integral / area / cell_volume;
+          }
+      return result;
+    }
   }
 }
 
@@ -169,6 +231,10 @@ namespace aspect
 {
   namespace Postprocess
   {
+    template Vector<double> compute_boundary_mean_density_transpose<2>(
+      const SimulatorAccess<2> &, const BoundaryMeanDensityBoundary, const double);
+    template Vector<double> compute_boundary_mean_density_transpose<3>(
+      const SimulatorAccess<3> &, const BoundaryMeanDensityBoundary, const double);
     ASPECT_REGISTER_POSTPROCESSOR(BoundaryDensities,
                                   "boundary densities",
                                   "A postprocessor that computes the laterally averaged "

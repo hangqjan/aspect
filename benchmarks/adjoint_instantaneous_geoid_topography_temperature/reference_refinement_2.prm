@@ -1,0 +1,11 @@
+# Refinement-2 version of the synthetic reference. This has 6,144 initial
+# cells (one eighth of the refinement-3 case) and remains a forward-only
+# observation generator.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/reference.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-2/reference
+
+subsection Mesh refinement
+  set Initial global refinement = 2
+  set Time steps between mesh refinement = 0
+end

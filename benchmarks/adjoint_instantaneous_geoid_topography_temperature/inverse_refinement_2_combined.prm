@@ -1,0 +1,26 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/inverse_refinement_2_base.prm
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/generated_self_gravitating_geoid_observation_refinement_2.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-2/inverse-combined
+
+subsection Adjoint
+  set List of objectives = dynamic topography, self-gravitating geoid
+  subsection Dynamic topography
+    set Target topography model = file
+    subsection Observation
+      set Observation source = file
+      set Observation format = ASPECT native
+      subsection ASPECT reference
+        set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-2/reference
+        set Time selection = final
+        set Surface boundary = top
+      end
+    end
+  end
+  subsection Self-gravitating geoid
+    # The coupled geoid operator includes surface and CMB topography in the
+    # forward model. The separate dynamic-topography objective supplies the
+    # spatial topography observation without duplicating its spectral terms.
+    set Field weights = 0, 0, 1e16, 1e16
+  end
+end

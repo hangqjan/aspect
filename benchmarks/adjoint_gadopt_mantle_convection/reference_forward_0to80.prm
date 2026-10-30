@@ -1,0 +1,28 @@
+# Runnable physical 0-to-80 TD-GADOPT temperature reference.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/reference_forward.prm
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/build-release/gadopt-temperature-plugins/libgadopt_temperature_plugins.release.so
+set Output directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/results_0to80/reference
+
+subsection Initial temperature model
+  set Model name = gadopt temperature initial
+end
+
+subsection Mesh refinement
+  set Initial global refinement = 5
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization, terminal temperature observation
+  subsection Visualization
+    set Time between graphical output = 0
+  end
+  subsection Terminal temperature observation
+    set Samples in x = 129
+    set Samples in y = 129
+    set Box x extent = 1
+    set Box y extent = 1
+    set Output file name = terminal_temperature.txt
+  end
+end

@@ -4,7 +4,7 @@
   This file is part of ASPECT.
 */
 
-#include <aspect/adjoint/observation/volume_field_observation.h>
+#include <aspect/adjoint/observation/full_field_observation.h>
 
 #include <aspect/geometry_model/interface.h>
 
@@ -17,20 +17,20 @@ namespace aspect
     namespace Observation
     {
       template <int dim>
-      VolumeFieldObservation<dim>::VolumeFieldObservation()
+      FullFieldObservation<dim>::FullFieldObservation()
         : source(Source::function),
           target_function(1),
           coordinate_system(Utilities::Coordinates::cartesian)
       {}
 
       template <int dim>
-      void VolumeFieldObservation<dim>::declare_parameters(ParameterHandler &prm)
+      void FullFieldObservation<dim>::declare_parameters(ParameterHandler &prm)
       {
         prm.declare_entry("Observation source", "function",
                           Patterns::Selection("function|file"),
-                          "Reference-data source for this terminal scalar-field "
-                          "misfit. A file is read once and interpolated into the "
-                          "current ASPECT finite-element space.");
+                          "Data source for this full-field observation. A file is "
+                          "read once and interpolated into the current ASPECT finite-"
+                          "element space.");
 
         prm.declare_entry("Coordinate system", "cartesian",
                           Patterns::Selection("cartesian|spherical|depth"),
@@ -50,7 +50,7 @@ namespace aspect
       }
 
       template <int dim>
-      void VolumeFieldObservation<dim>::parse_parameters(ParameterHandler &prm)
+      void FullFieldObservation<dim>::parse_parameters(ParameterHandler &prm)
       {
         const std::string source_name = prm.get("Observation source");
         source = source_name == "function" ? Source::function : Source::structured_file;
@@ -81,7 +81,7 @@ namespace aspect
       }
 
       template <int dim>
-      void VolumeFieldObservation<dim>::initialize(const AdvectionField &field)
+      void FullFieldObservation<dim>::initialize(const AdvectionField &field)
       {
         if (file_observation != nullptr || in_memory_observation != nullptr)
           return;
@@ -124,7 +124,7 @@ namespace aspect
       }
 
       template <int dim>
-      double VolumeFieldObservation<dim>::value(const Point<dim> &position) const
+      double FullFieldObservation<dim>::value(const Point<dim> &position) const
       {
         AssertThrow(source == Source::function,
                     ExcMessage("A materialized discrete observation must be evaluated "
@@ -137,14 +137,14 @@ namespace aspect
       }
 
       template <int dim>
-      bool VolumeFieldObservation<dim>::is_discrete() const
+      bool FullFieldObservation<dim>::is_discrete() const
       {
         return in_memory_observation != nullptr || file_observation != nullptr;
       }
 
       template <int dim>
       const LinearAlgebra::BlockVector &
-      VolumeFieldObservation<dim>::discrete_state() const
+      FullFieldObservation<dim>::discrete_state() const
       {
         AssertThrow(is_discrete(),
                     ExcMessage("No discrete terminal observation has been installed."));
@@ -155,7 +155,7 @@ namespace aspect
       }
 
       template <int dim>
-      void VolumeFieldObservation<dim>::assert_current_layout(
+      void FullFieldObservation<dim>::assert_current_layout(
         const LinearAlgebra::BlockVector &state) const
       {
         const auto &partitioning = this->introspection().index_sets.system_partitioning;
@@ -171,7 +171,7 @@ namespace aspect
       }
 
       template <int dim>
-      void VolumeFieldObservation<dim>::set_discrete_state(
+      void FullFieldObservation<dim>::set_discrete_state(
         const LinearAlgebra::BlockVector &state)
       {
         assert_current_layout(state);
@@ -186,7 +186,7 @@ namespace aspect
       }
 
       template <int dim>
-      void VolumeFieldObservation<dim>::clear_discrete_state()
+      void FullFieldObservation<dim>::clear_discrete_state()
       {
         in_memory_observation.reset();
       }
@@ -196,7 +196,7 @@ namespace aspect
 
 namespace aspect
 {
-#define INSTANTIATE(dim) template class Adjoint::Observation::VolumeFieldObservation<dim>;
+#define INSTANTIATE(dim) template class Adjoint::Observation::FullFieldObservation<dim>;
   ASPECT_INSTANTIATE(INSTANTIATE)
 #undef INSTANTIATE
 }

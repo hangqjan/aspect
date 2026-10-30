@@ -1,0 +1,3 @@
+# Reconstruct the reference composition at step 70 from its terminal step-80 field.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/inverse_initial_composition.prm

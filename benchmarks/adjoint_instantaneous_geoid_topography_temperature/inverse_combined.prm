@@ -1,0 +1,26 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/inverse_base.prm
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/generated_self_gravitating_geoid_observation.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/inverse-combined
+
+subsection Adjoint
+  set List of objectives = dynamic topography, self-gravitating geoid
+  subsection Dynamic topography
+    set Target topography model = file
+    subsection Observation
+      set Observation source = file
+      set Observation format = ASPECT native
+      subsection ASPECT reference
+        set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/reference
+        set Time selection = final
+        set Surface boundary = top
+      end
+    end
+  end
+  subsection Self-gravitating geoid
+    # Balance the initial reduced-gradient norms of the geoid and surface
+    # topography terms; the geoid-only case intentionally uses a larger
+    # normalization to expose its standalone reconstruction.
+    set Field weights = 0, 0, 1e16, 1e16
+  end
+end

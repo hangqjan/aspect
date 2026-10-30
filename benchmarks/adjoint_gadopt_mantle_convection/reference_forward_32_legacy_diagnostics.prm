@@ -1,0 +1,120 @@
+# Compatibility input for the retained TD-GADOPT diagnostics executable.
+#
+# This file reproduces the refinement-5 reference run with the pre-refactor
+# parameter layout expected by /private/tmp/aspect-td-gadopt-diagnostics.
+# It deliberately uses the exact legacy initial-temperature plugin because
+# the equivalent expression in reference_forward.prm contains erf(), which
+# is not available in the configured muparser build.
+
+set Dimension                            = 2
+set Use years instead of seconds         = false
+set Output directory                     = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/output-adjoint-gadopt-reference-32
+set Pressure normalization               = surface
+set Surface pressure                     = 0
+set Nonlinear solver scheme              = single Advection, single Stokes, adjoint temperature
+set Maximum time step                    = 4
+set CFL number                           = 1
+
+subsection Discretization
+  set Stokes velocity polynomial degree = 2
+  set Temperature polynomial degree     = 1
+end
+
+subsection Time stepping
+  set List of model names = function
+  subsection Function
+    set Variable names      = time
+    set Function expression = 4
+  end
+end
+
+subsection Termination criteria
+  set Termination criteria = end step
+  set End step             = 80
+end
+
+subsection Adjoint
+  set Solve mode                = kernel
+  set List of objectives        = temperature field
+  set Trajectory anchor spacing = 1
+  set Trajectory cleanup policy = keep
+
+  subsection Temperature field
+    set Coordinate system = cartesian
+    subsection Target function
+      set Variable names      = x,y
+      set Function expression = 0
+    end
+    subsection Weight function
+      set Variable names      = x,y
+      set Function expression = 1
+    end
+  end
+end
+
+subsection Formulation
+  set Formulation = Boussinesq approximation
+end
+
+subsection Geometry model
+  set Model name = box
+  subsection Box
+    set X extent = 1
+    set Y extent = 1
+    set Z extent = 1
+  end
+end
+
+subsection Initial temperature model
+  set Model name = g-adopt reference
+end
+
+subsection Boundary temperature model
+  set List of model names                   = box
+  set Fixed temperature boundary indicators = bottom, top
+  subsection Box
+    set Bottom temperature = 1
+    set Top temperature    = 0
+  end
+end
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = left, right, bottom, top
+end
+
+subsection Gravity model
+  set Model name = vertical
+  subsection Vertical
+    set Magnitude = 1
+  end
+end
+
+subsection Material model
+  set Model name = simple
+  subsection Simple model
+    set Reference density              = 1
+    set Reference specific heat        = 1
+    set Reference temperature          = 0
+    set Thermal conductivity           = 1e-6
+    set Thermal expansion coefficient  = 1
+    set Viscosity                      = 1
+  end
+end
+
+subsection Mesh refinement
+  set Initial adaptive refinement        = 0
+  set Initial global refinement          = 5
+  set Time steps between mesh refinement = 0
+end
+
+subsection Checkpointing
+  set Time between checkpoint  = 0
+  set Steps between checkpoint = 0
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization
+  subsection Visualization
+    set Time between graphical output = 0
+  end
+end

@@ -1,0 +1,10 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/g5_surface_m0.prm
+
+set Output directory = output-adjoint-geoid-g5-surface-m1-cos
+
+subsection Adjoint
+  subsection Geoid
+    set Observed cosine coefficients = 0, 1, 0
+    set Coefficient weights = 0, 1, 0
+  end
+end

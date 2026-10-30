@@ -1,0 +1,11 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/g5_topography_base.prm
+
+set Output directory = output-adjoint-geoid-g5-surface-cmb-m0
+
+subsection Adjoint
+  subsection Geoid
+    set Coefficient weights = 1, 0, 0
+    set Include surface dynamic topography contribution = true
+    set Include CMB dynamic topography contribution = true
+  end
+end

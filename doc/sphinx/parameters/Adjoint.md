@@ -32,7 +32,7 @@ The following objective functionals are available:
 
 **Pattern:** [Selection kernel|optimize ]
 
-**Documentation:** Run the ordinary adjoint kernel or the opt-in reduced initial-temperature ROL optimization.
+**Documentation:** Run the ordinary adjoint kernel or the opt-in reduced initial scalar-field ROL optimization.
 ::::
 
 (parameters:Adjoint/Composition_20field)=
@@ -61,7 +61,7 @@ The following objective functionals are available:
 
 **Pattern:** [Selection function|file ]
 
-**Documentation:** Reference-data source for this terminal scalar-field misfit. A file is read once and interpolated into the current ASPECT finite-element space.
+**Documentation:** Data source for this full-field observation. A file is read once and interpolated into the current ASPECT finite-element space.
 ::::
 
 (parameters:Adjoint/Composition_20field/Observation_20file)=
@@ -523,7 +523,7 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 :name: parameters:Adjoint/Dynamic_20topography/Target_20topography_20model
 **Default value:** none
 
-**Pattern:** [Selection none|function ]
+**Pattern:** [Selection none|function|file ]
 
 **Documentation:** The model used to prescribe the target dynamic topography. The dynamic topography objective evaluates one half of the squared misfit between the computed and target topography. A target topography model is required when this objective is used.
 ::::
@@ -566,6 +566,131 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 **Pattern:** [Anything]
 
 **Documentation:** Names of the coordinates used in the target topography function.
+::::
+
+(parameters:Adjoint/Dynamic_20topography/Observation)=
+## **Subsection:** Adjoint / Dynamic topography / Observation
+::::{dropdown} __Parameter:__ {ref}`Interpolation neighbors<parameters:Adjoint/Dynamic_20topography/Observation/Interpolation_20neighbors>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Interpolation_20neighbors
+**Default value:** 8
+
+**Pattern:** [Integer range 1...2147483647 (inclusive)]
+
+**Documentation:** Number of cached scattered surface samples used by the inverse-distance interpolation.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Maximum interpolation distance factor<parameters:Adjoint/Dynamic_20topography/Observation/Maximum_20interpolation_20distance_20factor>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Maximum_20interpolation_20distance_20factor
+**Default value:** 4
+
+**Pattern:** [Double 0...MAX_DOUBLE (inclusive)]
+
+**Documentation:** Reject a target point whose nearest observation is farther than this multiple of the median nearest-sample spacing.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Observation file<parameters:Adjoint/Dynamic_20topography/Observation/Observation_20file>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Observation_20file
+**Default value:**
+
+**Pattern:** [Anything]
+
+**Documentation:** Explicit observation filename. If empty, ASPECT-native input is discovered from the reference output directory.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Observation format<parameters:Adjoint/Dynamic_20topography/Observation/Observation_20format>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Observation_20format
+**Default value:** generic
+
+**Pattern:** [Selection generic|ASPECT native ]
+
+**Documentation:** File format when Observation source is file. ASPECT native selects the documented dynamic-topography or geoid surface output required by the owning objective.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Observation source<parameters:Adjoint/Dynamic_20topography/Observation/Observation_20source>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Observation_20source
+**Default value:** function
+
+**Pattern:** [Selection function|file ]
+
+**Documentation:** Source for this scalar surface observation.
+::::
+
+(parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference)=
+## **Subsection:** Adjoint / Dynamic topography / Observation / ASPECT reference
+::::{dropdown} __Parameter:__ {ref}`Output directory<parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Output_20directory>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Output_20directory
+**Default value:**
+
+**Pattern:** [Anything]
+
+**Documentation:** Output directory of the standalone ASPECT reference run.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Surface boundary<parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Surface_20boundary>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Surface_20boundary
+**Default value:** top
+
+**Pattern:** [Anything]
+
+**Documentation:** Symbolic boundary name for ASPECT-native dynamic topography.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Time selection<parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Time_20selection>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Time_20selection
+**Default value:** final
+
+**Pattern:** [Selection final|timestep ]
+
+**Documentation:** Select the final available native output or an explicit timestep.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Timestep<parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Timestep>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/ASPECT_20reference/Timestep
+**Default value:** 0
+
+**Pattern:** [Integer range 0...2147483647 (inclusive)]
+
+**Documentation:** Timestep selected when Time selection is timestep.
+::::
+
+(parameters:Adjoint/Dynamic_20topography/Observation/Target_20function)=
+## **Subsection:** Adjoint / Dynamic topography / Observation / Target function
+::::{dropdown} __Parameter:__ {ref}`Coordinate system<parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Coordinate_20system>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Coordinate_20system
+**Default value:** cartesian
+
+**Pattern:** [Selection cartesian|spherical|depth ]
+
+**Documentation:** Coordinate system used by a function surface observation.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Function constants<parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Function_20constants>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Function_20constants
+**Default value:**
+
+**Pattern:** [Anything]
+
+**Documentation:** Sometimes it is convenient to use symbolic constants in the expression that describes the function, rather than having to use its numeric value everywhere the constant appears. These values can be defined using this parameter, in the form &lsquo;var1=value1, var2=value2, ...&rsquo;.
+
+A typical example would be to set this runtime parameter to &lsquo;pi=3.1415926536&rsquo; and then use &lsquo;pi&rsquo; in the expression of the actual formula. (That said, for convenience this class actually defines both &lsquo;pi&rsquo; and &lsquo;Pi&rsquo; by default, but you get the idea.)
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Function expression<parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Function_20expression>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Function_20expression
+**Default value:** 0
+
+**Pattern:** [Anything]
+
+**Documentation:** Target scalar surface observation.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Variable names<parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Variable_20names>`
+:name: parameters:Adjoint/Dynamic_20topography/Observation/Target_20function/Variable_20names
+**Default value:** x,y,t
+
+**Pattern:** [Anything]
+
+**Documentation:** The names of the variables as they will be used in the function, separated by commas. By default, the names of variables at which the function will be evaluated are &lsquo;x&rsquo; (in 1d), &lsquo;x,y&rsquo; (in 2d) or &lsquo;x,y,z&rsquo; (in 3d) for spatial coordinates and &lsquo;t&rsquo; for time. You can then use these variable names in your function expression and they will be replaced by the values of these variables at which the function is currently evaluated. However, you can also choose a different set of names for the independent variables at which to evaluate your function expression. For example, if you work in spherical coordinates, you may wish to set this input parameter to &lsquo;r,phi,theta,t&rsquo; and then use these variable names in your function expression.
 ::::
 
 (parameters:Adjoint/Geoid)=
@@ -624,6 +749,15 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 **Documentation:** Minimum degree l_min in the shared degree-major geoid coefficient layout.
 ::::
 
+::::{dropdown} __Parameter:__ {ref}`Observation source<parameters:Adjoint/Geoid/Observation_20source>`
+:name: parameters:Adjoint/Geoid/Observation_20source
+**Default value:** inline
+
+**Pattern:** [Selection inline|file ]
+
+**Documentation:** Use inline coefficient lists or a cached coefficient-file observation.
+::::
+
 ::::{dropdown} __Parameter:__ {ref}`Observed cosine coefficients<parameters:Adjoint/Geoid/Observed_20cosine_20coefficients>`
 :name: parameters:Adjoint/Geoid/Observed_20cosine_20coefficients
 **Default value:**
@@ -651,8 +785,66 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 **Documentation:** Density above the surface used by the dynamic-topography and surface-geoid operators.
 ::::
 
+(parameters:Adjoint/Geoid/Observation)=
+## **Subsection:** Adjoint / Geoid / Observation
+::::{dropdown} __Parameter:__ {ref}`Observation file<parameters:Adjoint/Geoid/Observation/Observation_20file>`
+:name: parameters:Adjoint/Geoid/Observation/Observation_20file
+**Default value:**
+
+**Pattern:** [Anything]
+
+**Documentation:** Explicit coefficient filename, overriding reference-directory discovery.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Observation format<parameters:Adjoint/Geoid/Observation/Observation_20format>`
+:name: parameters:Adjoint/Geoid/Observation/Observation_20format
+**Default value:** generic
+
+**Pattern:** [Selection generic|ASPECT native ]
+
+**Documentation:** Coefficient-file format. ASPECT native uses the canonical geoid degree/order/cosine/sine convention.
+::::
+
+(parameters:Adjoint/Geoid/Observation/ASPECT_20reference)=
+## **Subsection:** Adjoint / Geoid / Observation / ASPECT reference
+::::{dropdown} __Parameter:__ {ref}`Output directory<parameters:Adjoint/Geoid/Observation/ASPECT_20reference/Output_20directory>`
+:name: parameters:Adjoint/Geoid/Observation/ASPECT_20reference/Output_20directory
+**Default value:**
+
+**Pattern:** [Anything]
+
+**Documentation:** Output directory of the standalone ASPECT reference run.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Time selection<parameters:Adjoint/Geoid/Observation/ASPECT_20reference/Time_20selection>`
+:name: parameters:Adjoint/Geoid/Observation/ASPECT_20reference/Time_20selection
+**Default value:** final
+
+**Pattern:** [Selection final|timestep ]
+
+**Documentation:** Select the final available native geoid coefficient output or a timestep.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Timestep<parameters:Adjoint/Geoid/Observation/ASPECT_20reference/Timestep>`
+:name: parameters:Adjoint/Geoid/Observation/ASPECT_20reference/Timestep
+**Default value:** 0
+
+**Pattern:** [Integer range 0...2147483647 (inclusive)]
+
+**Documentation:** Timestep selected when Time selection is timestep.
+::::
+
 (parameters:Adjoint/Optimization)=
 ## **Subsection:** Adjoint / Optimization
+::::{dropdown} __Parameter:__ {ref}`Control field<parameters:Adjoint/Optimization/Control_20field>`
+:name: parameters:Adjoint/Optimization/Control_20field
+**Default value:** temperature
+
+**Pattern:** [Anything]
+
+**Documentation:** The scalar advection field optimized at the initial time. Use the value temperature for the historical control, or the name of one continuous chemical composition field.
+::::
+
 ::::{dropdown} __Parameter:__ {ref}`Gradient tolerance<parameters:Adjoint/Optimization/Gradient_20tolerance>`
 :name: parameters:Adjoint/Optimization/Gradient_20tolerance
 **Default value:** 1e-8
@@ -698,6 +890,15 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 **Documentation:**
 ::::
 
+::::{dropdown} __Parameter:__ {ref}`Output accepted controls<parameters:Adjoint/Optimization/Output_20accepted_20controls>`
+:name: parameters:Adjoint/Optimization/Output_20accepted_20controls
+**Default value:** false
+
+**Pattern:** [Bool]
+
+**Documentation:** Write the zero control and each accepted initial control as VTK diagnostics under output/diagnostics/accepted_controls.
+::::
+
 ::::{dropdown} __Parameter:__ {ref}`Output verbosity<parameters:Adjoint/Optimization/Output_20verbosity>`
 :name: parameters:Adjoint/Optimization/Output_20verbosity
 **Default value:** 0
@@ -731,7 +932,7 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 
 **Pattern:** [Bool]
 
-**Documentation:** Use the per-control bounds induced by 0 <= T_fixed + Pm <= 1 instead of uniform increment bounds.
+**Documentation:** Use the per-control bounds induced by 0 <= q_fixed + Pm <= 1 for the selected scalar field instead of uniform increment bounds. The parameter name is retained for backward compatibility.
 ::::
 
 (parameters:Adjoint/Self_2dgravitating_20geoid)=
@@ -870,7 +1071,7 @@ A typical example would be to set this runtime parameter to &lsquo;pi=3.14159265
 
 **Pattern:** [Selection function|file ]
 
-**Documentation:** Reference-data source for this terminal scalar-field misfit. A file is read once and interpolated into the current ASPECT finite-element space.
+**Documentation:** Data source for this full-field observation. A file is read once and interpolated into the current ASPECT finite-element space.
 ::::
 
 (parameters:Adjoint/Temperature_20field/Observation_20file)=

@@ -22,6 +22,7 @@
 #ifndef _aspect_postprocess_geoid_h
 #define _aspect_postprocess_geoid_h
 
+#include <aspect/postprocess/geoid_harmonics.h>
 #include <aspect/postprocess/interface.h>
 #include <aspect/simulator_access.h>
 
@@ -79,11 +80,25 @@ namespace aspect
         evaluate (const Point<dim> &) const;
 
       private:
+        /** Harmonic topography and its adjacent-layer mean density. */
+        struct BoundaryTopographyHarmonics
+        {
+          double average_density = 0.0;
+          SphericalHarmonicCoefficients topography;
+        };
+
+        /** Surface and CMB inputs prepared for conventional geoid scaling. */
+        struct TopographyHarmonics
+        {
+          BoundaryTopographyHarmonics surface;
+          BoundaryTopographyHarmonics cmb;
+        };
+
         /**
          * Parameters to set the maximum and minimum degree when computing geoid from spherical harmonics
          */
-        unsigned int max_degree;
-        unsigned int min_degree;
+        unsigned int maximum_degree;
+        unsigned int minimum_degree;
 
         /**
          * A parameter to control whether to output the data in geographical coordinates.
@@ -94,22 +109,22 @@ namespace aspect
         /**
          * A parameter to control whether to output the spherical harmonic coefficients of the geoid anomaly
          */
-        bool output_geoid_anomaly_SH_coes;
+        bool output_geoid_anomaly_coefficients;
 
         /**
          * A parameter to control whether to output the spherical harmonic coefficients of the surface topography contribution
          */
-        bool output_surface_topo_contribution_SH_coes;
+        bool output_surface_topography_contribution_coefficients;
 
         /**
          * A parameter to control whether to output the spherical harmonic coefficients of the CMB topography contribution
          */
-        bool output_CMB_topo_contribution_SH_coes;
+        bool output_cmb_topography_contribution_coefficients;
 
         /**
          * A parameter to control whether to output the spherical harmonic coefficients of the density anomaly
          */
-        bool output_density_anomaly_contribution_SH_coes;
+        bool output_density_anomaly_contribution_coefficients;
 
         /**
          * A parameter to control whether to output the free-air gravity anomaly
@@ -125,12 +140,12 @@ namespace aspect
         /**
          * A parameter to control whether to include the surface topography contribution on geoid
          */
-        bool include_surface_topo_contribution;
+        bool include_surface_topography_contribution;
 
         /**
          * A parameter to control whether to include the CMB topography contribution on geoid
          */
-        bool include_CMB_topo_contribution;
+        bool include_cmb_topography_contribution;
 
         /**
          * A parameter to specify if the top boundary is an active free surface
@@ -140,7 +155,7 @@ namespace aspect
         /**
          * A parameter to specify if the bottom boundary is an active free surface
          */
-        bool use_free_CMB_topography;
+        bool use_free_cmb_topography;
 
         /**
          * Function to compute the real spherical harmonic coefficients (cos and sin part) from min degree to max degree
@@ -148,16 +163,8 @@ namespace aspect
          * The inner vector stores theta, phi, spherical infinitesimal, and function value on a spherical surface.
          * The outer vector stores the inner vector associated with each quadrature point on a spherical surface.
          */
-        std::pair<std::vector<double>,std::vector<double>>
+        SphericalHarmonicCoefficients
         to_spherical_harmonic_coefficients(const std::vector<std::vector<double>> &spherical_function) const;
-
-        /**
-         * Function to compute the density contribution in spherical harmonic expansion throughout the mantle
-         * The input outer radius is needed to evaluate the density integral contribution of whole model domain at the surface
-         * This function returns a pair containing real spherical harmonics of density integral (cos and sin part) from min degree to max degree.
-         */
-        std::pair<std::vector<double>,std::vector<double>>
-        density_contribution (const double &outer_radius) const;
 
         /**
          * Function to compute the surface and CMB topography contribution in spherical harmonic expansion
@@ -168,18 +175,12 @@ namespace aspect
          * The topography is based on the dynamic topography postprocessor in case of no free surface,
          * and based on the real surface from the geometry model in case of a free surface.
          */
-        std::pair<std::pair<double, std::pair<std::vector<double>,std::vector<double>>>, std::pair<double, std::pair<std::vector<double>,std::vector<double>>>>
+        TopographyHarmonics
         topography_contribution(const double &outer_radius,
                                 const double &inner_radius) const;
 
-        /**
-         * A vector to store the cosine terms of the geoid anomaly spherical harmonic coefficients.
-         */
-        std::vector<double> geoid_coecos;
-        /**
-         * A vector to store the sine terms of the geoid anomaly spherical harmonic coefficients.
-         */
-        std::vector<double> geoid_coesin;
+        /** Complete, validated spherical-harmonic representation of the geoid. */
+        SphericalHarmonicCoefficients geoid_coefficients;
     };
   }
 }

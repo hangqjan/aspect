@@ -1,0 +1,11 @@
+# Non-axisymmetric forward-only smoke case. The m=1 temperature
+# perturbation exercises cosine/sine harmonic storage on the coupled path.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/sg0_coupled_m0.prm
+
+set Output directory = output-adjoint-geoid-sg0-coupled-m1
+
+subsection Initial temperature model
+  subsection Function
+    set Function expression = 1600 + 100 * y / 6336000
+  end
+end

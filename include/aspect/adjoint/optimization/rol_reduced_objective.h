@@ -14,6 +14,8 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace aspect
 {
@@ -75,6 +77,10 @@ namespace aspect
         unsigned int hessvec_calls() const;
         unsigned int inverse_hessvec_calls() const;
 
+        /** Objective values at the initial control and accepted controls. */
+        const std::vector<std::pair<unsigned int, double>> &
+        accepted_objective_history() const;
+
       private:
         static const ROLReducedL2Vector &as_l2_control(const ROL::Vector<double> &vector);
         static ROLReducedL2Vector &as_l2_control(ROL::Vector<double> &vector);
@@ -110,6 +116,8 @@ namespace aspect
         unsigned int n_preconditioner_calls = 0;
         unsigned int n_hessvec_calls = 0;
         unsigned int n_inverse_hessvec_calls = 0;
+        unsigned int n_accepted_control_outputs = 0;
+        std::vector<std::pair<unsigned int, double>> accepted_objectives;
         unsigned int n_value_calls;
         unsigned int n_gradient_calls;
         unsigned int n_forward_evaluations;

@@ -65,9 +65,12 @@ namespace aspect
     ROLReducedObjective<dim>::extract_scalar_objective(
       const std::map<std::string, double> &objectives)
     {
-      AssertThrow(objectives.size() == 1,
-                  ExcMessage("ROLReducedObjective requires exactly one active scalar objective."));
-      return objectives.begin()->second;
+      AssertThrow(!objectives.empty(),
+                  ExcMessage("ROLReducedObjective requires at least one active scalar objective."));
+      double total = 0.0;
+      for (const auto &objective : objectives)
+        total += objective.second;
+      return total;
     }
 
 
@@ -212,6 +215,7 @@ namespace aspect
             forward_trajectory_is_live = false;
             current_generation_id = 0;
             discard_accepted_generation();
+            accepted_objectives.clear();
             break;
 
           case ROL::UpdateType::Trial:
@@ -234,8 +238,14 @@ namespace aspect
             // Acceptance changes the optimizer's reference point. The next
             // callback may reuse the matching cache, but any old accepted
             // backup is now obsolete.
+            AssertThrow(cached_value_is_valid && has_cached_control(control),
+                        ExcMessage("ROL accepted a control without its matching reduced-objective value."));
+            const unsigned int accepted_iteration = ++n_accepted_control_outputs;
+            accepted_objectives.emplace_back(accepted_iteration, cached_objective);
             invalidate_live_forward_if_control_changed(control);
             discard_accepted_generation();
+            manager.write_accepted_optimization_control(control.get_vector(),
+                                                        accepted_iteration);
             break;
         }
     }
@@ -275,6 +285,9 @@ namespace aspect
       const double objective = extract_scalar_objective(
                                  manager.evaluate_initial_temperature_control(control.get_vector()));
       begin_generation(control, objective);
+      if (accepted_objectives.empty() && n_initial_updates == 1
+          && n_accepted_control_outputs == 0)
+        accepted_objectives.emplace_back(0, objective);
       return objective;
     }
 
@@ -452,6 +465,13 @@ namespace aspect
     template <int dim> unsigned int ROLReducedObjective<dim>::inverse_hessvec_calls() const
     {
       return n_inverse_hessvec_calls;
+    }
+
+    template <int dim>
+    const std::vector<std::pair<unsigned int, double>> &
+    ROLReducedObjective<dim>::accepted_objective_history() const
+    {
+      return accepted_objectives;
     }
 
   }

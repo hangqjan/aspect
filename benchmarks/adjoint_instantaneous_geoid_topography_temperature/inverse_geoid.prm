@@ -1,0 +1,13 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/inverse_base.prm
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/generated_self_gravitating_geoid_observation.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/inverse-geoid
+
+subsection Adjoint
+  set List of objectives = self-gravitating geoid
+  subsection Self-gravitating geoid
+    # Geoid coefficients are O(1) while their temperature sensitivity carries
+    # SI spherical-shell scales. Normalize the geoid-only reduced functional.
+    set Field weights = 0, 0, 1e20, 1e20
+  end
+end

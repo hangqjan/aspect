@@ -1,0 +1,16 @@
+# Generated from the native self-gravitating reference statistics.
+subsection Adjoint
+  subsection Self-gravitating geoid
+    set Observed surface topography cosine coefficients = -1.0233639770882322e+01, -1.3937461174400848e-09, -6.3532570880039335e-10
+    set Observed surface topography sine coefficients = 0.0000000000000000e+00, 4.7446525892158550e-09, -1.9948231701540866e-09
+    set Observed CMB topography cosine coefficients = -3.8231577924971942e+00, -1.2072853203327997e-09, -1.0183169889854258e-09
+    set Observed CMB topography sine coefficients = 0.0000000000000000e+00, 2.3247046193082975e-09, -1.2303049456507781e-09
+    set Observed surface geoid cosine coefficients = -5.4234132981607894e+00, -1.0859027209822934e-09, -4.3880238991608529e-10
+    set Observed surface geoid sine coefficients = 0.0000000000000000e+00, 2.0808865834902434e-09, -1.4470611191638544e-09
+    set Observed CMB geoid cosine coefficients = -3.1871769941723902e+00, -7.0485770970588871e-10, -2.5731178598243423e-09
+    set Observed CMB geoid sine coefficients = 0.0000000000000000e+00, 2.2866907173023039e-09, -4.8901395789224631e-10
+    set Coefficient weights = 1, 1, 1
+    set Surface density above = 0
+    set CMB density below = 9900
+  end
+end

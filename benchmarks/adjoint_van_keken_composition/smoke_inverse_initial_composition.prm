@@ -1,0 +1,22 @@
+# Small one-iteration execution check for the chemical reduced control.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_van_keken_composition/inverse_initial_composition.prm
+
+set End time          = 0.02
+set Maximum time step  = 0.01
+set Output directory   = output-adjoint-van-keken-smoke-inverse
+
+subsection Mesh refinement
+  set Initial global refinement = 3
+end
+
+subsection Adjoint
+  subsection Composition field
+    subsection Observation file
+      set Data directory = output-adjoint-van-keken-smoke-reference
+    end
+  end
+  subsection Optimization
+    set Maximum iterations          = 1
+    set Initial trust-region radius = 1e-2
+  end
+end

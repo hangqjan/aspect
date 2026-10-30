@@ -1,0 +1,13 @@
+# Canonical forward-only coupled self-gravity smoke case. It retains the
+# validated small G5 spherical-shell model and adds only the coupled postprocessor.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/g5_topography_base.prm
+
+set Output directory = output-adjoint-geoid-sg0-coupled-m0
+
+subsection Postprocess
+  set List of postprocessors = self-gravitating geoid, adjoint kernels
+  subsection Self-gravitating geoid
+    set Minimum degree = 2
+    set Maximum degree = 3
+  end
+end

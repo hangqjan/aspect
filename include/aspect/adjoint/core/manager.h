@@ -139,9 +139,13 @@ namespace aspect
         bool
         time_dependent_temperature_workflow_enabled() const;
 
+        /** Return whether the steady instantaneous-Stokes adjoint workflow is active. */
+        bool
+        instantaneous_stokes_workflow_enabled() const;
+
         bool optimization_enabled() const;
 
-        /** Run the opt-in native ROL reduced initial-temperature solve. */
+        /** Run the opt-in native ROL reduced scalar-field solve. */
         void run_initial_temperature_optimization();
 
         /**
@@ -213,7 +217,7 @@ namespace aspect
 
         bool has_optimization_initial_state() const;
 
-        /** Install T_fixed + P m after an O3 baseline restore. */
+        /** Install q_fixed + P m for the selected scalar field after an O3 baseline restore. */
         void install_initial_temperature_control(const LinearAlgebra::Vector &control);
 
         /** Replace the physical baseline in T_ic = T_fixed + Pm. */
@@ -247,7 +251,7 @@ namespace aspect
           const LinearAlgebra::Vector &temperature);
 
         /**
-         * Return the immutable reduced initial-temperature control space and
+         * Return the immutable reduced selected-field control space and
          * its cached L2 metric after restoring the O3 canonical baseline.
          */
         const InitialTemperatureControl<dim> &get_initial_temperature_control_space();
@@ -277,7 +281,7 @@ namespace aspect
         get_terminal_advection_field_seed(const AdvectionField &field) const;
 
         /**
-         * Evaluate an initial-temperature control from the canonical in-memory
+         * Evaluate the selected initial scalar-field control from the canonical in-memory
          * baseline. When @p l2_gradient is non-null, run the matching reverse
          * sweep and return its reduced L2 Riesz representative in that vector.
          */
@@ -287,13 +291,17 @@ namespace aspect
 
         /**
          * Complete the reverse half of the immediately preceding
-         * value-only initial-temperature control evaluation. This is an
+         * value-only selected-field control evaluation. This is an
          * O4/O5 optimization entry point: it never restores the baseline or
          * reruns the forward model, and is therefore valid only while that
          * forward trajectory is still the active manager state.
          */
         std::map<std::string, double>
         complete_initial_temperature_control_gradient(LinearAlgebra::Vector &l2_gradient);
+
+        /** Write one selected-field initial control as a benchmark diagnostic. */
+        void write_accepted_optimization_control(const LinearAlgebra::Vector &control,
+                                                 const unsigned int iteration) const;
 
       private:
         friend class TimeDependentWorkflow<dim>;
@@ -323,12 +331,29 @@ namespace aspect
 
         void ensure_initial_temperature_control_space();
 
+        AdvectionField optimization_control_field() const;
+        ComponentMask optimization_control_component_mask() const;
+
         /**
          * Check that the transient temperature workflow is used only in the
          * narrow v1 support envelope.
          */
         void
         validate_time_dependent_temperature_setup() const;
+
+        /**
+         * Complete the steady reduced-field derivative after an instantaneous
+         * forward/adjoint evaluation. This combines the Stokes-state path
+         * with explicit material-property kernels owned by the objectives.
+         */
+        std::map<std::string, double>
+        complete_instantaneous_initial_field_gradient(LinearAlgebra::Vector &l2_gradient);
+
+        /** Map direct density/viscosity kernels to the selected scalar field. */
+        void
+        add_instantaneous_direct_kernel_field_transpose(
+          const AdvectionField &advection_field,
+          LinearAlgebra::BlockVector &field_adjoint) const;
 
         /**
          * Solve a Stokes adjoint system from an already assembled full-system

@@ -88,12 +88,12 @@ namespace aspect
       for (unsigned int field = 0; field < fields.size(); ++field)
         for (unsigned int index = 0; index < fields[field]->size(); ++index)
           {
-            fields[field]->cosine(index) = weights[index]
+            fields[field]->cosine(index) = field_weights[field] * weights[index]
                                            * (fields[field]->cosine(index)
                                               - observed_coefficients[field].cosine(index));
-            fields[field]->sine(index) = weights[index]
-                                         * (fields[field]->sine(index)
-                                            - observed_coefficients[field].sine(index));
+            fields[field]->sine(index) = field_weights[field] * weights[index]
+                                        * (fields[field]->sine(index)
+                                           - observed_coefficients[field].sine(index));
           }
       return seed;
     }
@@ -129,7 +129,7 @@ namespace aspect
             const double sine_residual =
               fields[field]->sine(index)
               - observed_coefficients[field].sine(index);
-            objective += 0.5 * weights[index]
+            objective += 0.5 * field_weights[field] * weights[index]
                          * (cosine_residual * cosine_residual + sine_residual * sine_residual);
           }
       return objective;
@@ -309,6 +309,10 @@ namespace aspect
             }
           prm.declare_entry("Coefficient weights", "", Patterns::Anything(),
                             "Optional nonnegative degree/order weights shared by all four coupled fields and by cosine/sine.");
+          prm.declare_entry("Field weights", "1, 1, 1, 1", Patterns::Anything(),
+                            "Four nonnegative weights for surface topography, CMB topography, "
+                            "surface geoid, and CMB geoid respectively. A zero weight excludes "
+                            "that observed field from the objective and its adjoint seed.");
           prm.declare_entry("Surface density above", "0", Patterns::Double(0.0),
                             "Fixed exterior density above the surface. It must match Postprocess/Dynamic topography/Density above.");
           prm.declare_entry("CMB density below", "9900", Patterns::Double(0.0),
@@ -365,6 +369,16 @@ namespace aspect
                       ExcMessage("The coupled self-gravity coefficient weight list has an invalid length."));
           for (const double weight : weights)
             AssertThrow(weight >= 0.0, ExcMessage("Coupled self-gravity coefficient weights must be nonnegative."));
+          const std::vector<double> parsed_field_weights =
+            Utilities::string_to_double(Utilities::split_string_list(prm.get("Field weights")));
+          AssertThrow(parsed_field_weights.size() == field_weights.size(),
+                      ExcMessage("The coupled self-gravity field weight list must contain exactly four entries."));
+          for (unsigned int field = 0; field < field_weights.size(); ++field)
+            {
+              AssertThrow(parsed_field_weights[field] >= 0.0,
+                          ExcMessage("Coupled self-gravity field weights must be nonnegative."));
+              field_weights[field] = parsed_field_weights[field];
+            }
         }
         prm.leave_subsection();
       }

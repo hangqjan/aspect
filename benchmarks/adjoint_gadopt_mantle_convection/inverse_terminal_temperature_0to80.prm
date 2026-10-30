@@ -1,0 +1,70 @@
+# Reconstruct the physical step-0 temperature field from its step-80 field.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/reference_forward_0to80.prm
+
+set Output directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/results_0to80/inverse
+set Nonlinear solver scheme = single Advection, single Stokes, adjoint temperature
+
+subsection Initial temperature model
+  # The inverse begins from the same unperturbed background as the historic
+  # iteration-zero temperature control. Optimization reconstructs the missing
+  # localized initial anomaly over the full physical 0-to-80 time horizon.
+  set Model name = gadopt temperature initial
+  subsection Gadopt temperature initial
+    set Include localized anomaly = false
+  end
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization
+end
+
+subsection Adjoint
+  set Solve mode = optimize
+  set List of objectives = temperature field
+  subsection Temperature field
+    set Coordinate system = cartesian
+    set Observation source = file
+    subsection Observation file
+      set Data directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/results_0to80/reference
+      set Data file name = terminal_temperature.txt
+      set First point on slice = 0.0,1.0,0.0
+      set Scale factor = 1.
+      set Second point on slice = 1.0,0.0,0.0
+      set Slice dataset in 2D plane = false
+    end
+    # This subsection is inactive because Observation source is file. Keep its
+    # resolved values explicit so that the input remains self-documenting.
+    subsection Target function
+      set Function constants =
+      set Function expression = 0
+      set Variable names = x,y
+    end
+    subsection Weight function
+      set Function constants =
+      set Variable names = x,y
+      set Function expression = 1
+    end
+  end
+  subsection Time dependent
+    set Adjoint checkpoint interval = 50
+    set Advection preconditioner = transpose ilu
+    set Trajectory anchor spacing = 1
+    set Trajectory cleanup policy = keep
+    set Trajectory records per segment = 4
+    set Trajectory storage mode = minimal
+  end
+  subsection Optimization
+    set Control field = temperature
+    set Gradient tolerance = 1e-8
+    set Maximum iterations = 12
+    set Initial trust-region radius = 1e-3
+    set L-BFGS history size = 3
+    set Lower bound = -1e-2
+    set Use physical temperature bounds = true
+    set Output accepted controls = true
+    set Output verbosity = 0
+    set Step tolerance = 1e-12
+    set Upper bound = 1e-2
+  end
+end

@@ -36,7 +36,7 @@ namespace aspect
     template <int dim>
     void TerminalScalarFieldMisfit<dim>::declare_common_parameters(ParameterHandler &prm)
     {
-      Observation::VolumeFieldObservation<dim>::declare_parameters(prm);
+      Observation::FullFieldObservation<dim>::declare_parameters(prm);
       prm.enter_subsection("Weight function");
       {
         Functions::ParsedFunction<dim>::declare_parameters(prm, 1);

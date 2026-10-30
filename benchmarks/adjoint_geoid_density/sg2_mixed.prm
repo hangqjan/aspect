@@ -1,0 +1,29 @@
+# Production fixed-matrix coupled self-gravity integration case. All four
+# observed coefficient fields are zero, so its quadratic seed exercises the
+# two CBF branches and both density-moment transpose branches in one physical
+# adjoint.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/g5_topography_base.prm
+
+set Output directory = output-adjoint-geoid-sg2-mixed
+
+subsection Adjoint
+  set List of objectives = self-gravitating geoid
+
+  subsection Self-gravitating geoid
+    set Minimum spherical harmonic degree = 2
+    set Maximum spherical harmonic degree = 2
+    set Observed surface topography cosine coefficients = 0, 0, 0
+    set Observed surface topography sine coefficients = 0, 0, 0
+    set Observed CMB topography cosine coefficients = 0, 0, 0
+    set Observed CMB topography sine coefficients = 0, 0, 0
+    set Observed surface geoid cosine coefficients = 0, 0, 0
+    set Observed surface geoid sine coefficients = 0, 0, 0
+    set Observed CMB geoid cosine coefficients = 0, 0, 0
+    set Observed CMB geoid sine coefficients = 0, 0, 0
+    set Coefficient weights = 1, 2, 3
+  end
+end
+
+subsection Postprocess
+  set List of postprocessors = dynamic topography, boundary densities, adjoint kernels
+end

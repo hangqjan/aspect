@@ -22,6 +22,7 @@
 #define _aspect_adjoint_objective_dynamic_topography_objective_h
 
 #include <aspect/adjoint/objective/objective_functional.h>
+#include <aspect/adjoint/observation/surface_field_observation.h>
 #include <aspect/utilities.h>
 
 #include <deal.II/base/parsed_function.h>
@@ -47,6 +48,8 @@ namespace aspect
          * Constructor.
          */
         DynamicTopographyObjective ();
+
+        void initialize_simulator(const Simulator<dim> &simulator) override;
 
         /**
          * Declare the parameters used by this objective functional.
@@ -133,6 +136,9 @@ namespace aspect
          * evaluated.
          */
         Utilities::Coordinates::CoordinateSystem target_coordinate_system;
+
+        /** File targets are cached independently of boundary quadrature. */
+        mutable Observation::SurfaceFieldObservation<dim> observation;
     };
   }
 }

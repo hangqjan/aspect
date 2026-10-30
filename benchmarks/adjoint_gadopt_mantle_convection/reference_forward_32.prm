@@ -1,0 +1,24 @@
+# Primary refinement-5 TD-GADOPT reference configuration.
+#
+# The authoritative scaled coefficients and 16 x 16 smoke input remain in
+# reference_forward.prm. This primary overlay changes only resolution, output,
+# and standard ASPECT visualization after continuous Q1 developed a small
+# upper overshoot on the coarse grid.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/reference_forward.prm
+
+set Output directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_mantle_convection/output-adjoint-gadopt-reference-32
+
+subsection Mesh refinement
+  set Initial global refinement = 5
+end
+
+subsection Postprocess
+  # Export every accepted state through ASPECT's normal lifecycle. The VTK
+  # fields provide T70, T80, and u70...u79 without an embedded test harness.
+  set List of postprocessors = visualization
+
+  subsection Visualization
+    set Time between graphical output = 0
+  end
+end

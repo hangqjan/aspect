@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <vector>
@@ -37,9 +39,13 @@ namespace aspect
       {
         prm.declare_entry("Solve mode", "kernel", Patterns::Selection("kernel|optimize"),
                           "Run the ordinary adjoint kernel or the opt-in reduced "
-                          "initial-temperature ROL optimization.");
+                          "initial scalar-field ROL optimization.");
         prm.enter_subsection("Optimization");
         {
+          prm.declare_entry("Control field", "temperature", Patterns::Anything(),
+                            "The scalar advection field optimized at the initial "
+                            "time. Use the value temperature for the historical control, or "
+                            "the name of one continuous chemical composition field.");
           prm.declare_entry("Maximum iterations", "1", Patterns::Integer(0));
           prm.declare_entry("Gradient tolerance", "1e-8", Patterns::Double(0.0));
           prm.declare_entry("Step tolerance", "1e-12", Patterns::Double(0.0));
@@ -48,9 +54,13 @@ namespace aspect
           prm.declare_entry("Lower bound", "-1e-2", Patterns::Double());
           prm.declare_entry("Upper bound", "1e-2", Patterns::Double());
           prm.declare_entry("Output verbosity", "0", Patterns::Integer(0));
+          prm.declare_entry("Output accepted controls", "false", Patterns::Bool(),
+                            "Write the zero control and each accepted initial control as "
+                            "VTK diagnostics under output/diagnostics/accepted_controls.");
           prm.declare_entry("Use physical temperature bounds", "false", Patterns::Bool(),
-                            "Use the per-control bounds induced by 0 <= T_fixed + Pm <= 1 "
-                            "instead of uniform increment bounds.");
+                            "Use the per-control bounds induced by 0 <= q_fixed + Pm <= 1 "
+                            "for the selected scalar field instead of uniform increment bounds. "
+                            "The parameter name is retained for backward compatibility.");
         }
         prm.leave_subsection();
       }
@@ -80,7 +90,11 @@ namespace aspect
           lower_bound = prm.get_double("Lower bound");
           upper_bound = prm.get_double("Upper bound");
           output_verbosity = prm.get_integer("Output verbosity");
+          output_accepted_controls = prm.get_bool("Output accepted controls");
           use_physical_temperature_bounds = prm.get_bool("Use physical temperature bounds");
+          control_field_name = prm.get("Control field");
+          AssertThrow(!control_field_name.empty(),
+                      ExcMessage("Adjoint/Optimization/Control field may not be empty."));
           validate_initial_temperature_optimization_parameters(
             lbfgs_history_size,
             gradient_tolerance,
@@ -111,11 +125,11 @@ namespace aspect
     {
       AssertThrow(optimization_enabled
                   && adjoint_manager.has_optimization_initial_state(),
-                  ExcMessage("Optimization requires the captured initial-temperature baseline."));
+                  ExcMessage("Optimization requires the captured initial-field baseline."));
 
-      // Optimize the reduced functional j(c)=J(T_0=T_fixed+P c). The vector
-      // space uses <x,y>=x^T(P^T M_T P)y, so ROL norms, gradients, and trust-
-      // region radii all have the physical temperature L2 interpretation.
+      // Optimize j(c)=J(q_0=q_fixed+P c), where q is the selected scalar
+      // advection field. The vector space uses <x,y>=x^T(P^T M_q P)y, so ROL
+      // norms, gradients, and trust-region radii have a physical L2 meaning.
       const auto &space = adjoint_manager.get_initial_temperature_control_space();
       const auto mass = space.mass_matrix();
       ROLReducedL2Vector x(space.locally_owned_control_dofs(),
@@ -123,11 +137,13 @@ namespace aspect
       ROLReducedL2Vector gradient(space.locally_owned_control_dofs(),
                                   this->get_mpi_communicator(), mass);
       x.setScalar(0.0);
+      if (output_accepted_controls)
+        adjoint_manager.write_accepted_optimization_control(x.get_vector(), 0);
 
       LinearAlgebra::Vector lower(x.get_vector()), upper(x.get_vector());
       if (use_physical_temperature_bounds)
         {
-          // Convert 0<=T_fixed+P c<=1 into per-free-coordinate bounds. With
+          // Convert 0<=q_fixed+P c<=1 into per-free-coordinate bounds. With
           // uniform increment bounds, the user instead bounds c directly.
           const auto physical_bounds =
             adjoint_manager.initial_temperature_control_physical_bounds();
@@ -168,6 +184,18 @@ namespace aspect
       ROLReducedObjective<dim> objective(adjoint_manager);
       std::ostringstream output;
       algorithm.run(x, gradient, objective, bounds, output);
+
+      if (output_accepted_controls
+          && Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) == 0)
+        {
+          const std::string filename = this->get_output_directory()
+                                       + "diagnostics/accepted_controls/objective_history.txt";
+          std::ofstream history(filename, std::ios::trunc);
+          AssertThrow(history, ExcMessage("Could not write accepted optimization objective history: " + filename));
+          history << "# accepted_iteration objective\n" << std::setprecision(17);
+          for (const auto &[iteration, value] : objective.accepted_objective_history())
+            history << iteration << ' ' << value << '\n';
+        }
 
       // Report callback counts as lifecycle invariants: a cached value/gradient
       // pair should share one forward generation, reverted trials must not

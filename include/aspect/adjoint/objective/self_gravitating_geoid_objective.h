@@ -43,6 +43,7 @@ namespace aspect
         unsigned int maximum_degree = 2;
         std::array<Postprocess::SphericalHarmonicCoefficients, 4> observed_coefficients;
         std::vector<double> weights;
+        std::array<double, 4> field_weights = {{1.0, 1.0, 1.0, 1.0}};
         double density_above = 0.0;
         double density_below = 9900.0;
     };

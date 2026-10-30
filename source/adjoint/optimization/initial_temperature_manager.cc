@@ -39,6 +39,7 @@
 #include <deal.II/base/table_handler.h>
 #include <deal.II/base/utilities.h>
 #include <deal.II/fe/fe_values.h>
+#include <deal.II/numerics/data_out.h>
 
 #include <algorithm>
 #include <cmath>
@@ -59,6 +60,36 @@ namespace aspect
   namespace Adjoint
   {
     template <int dim>
+    AdvectionField
+    Manager<dim>::optimization_control_field() const
+    {
+      const std::string &name = initial_temperature_optimization.control_field_name;
+      if (name == "temperature")
+        return AdvectionField::temperature();
+
+      const unsigned int compositional_index =
+        this->introspection().compositional_index_for_name(name);
+      AssertThrow(compositional_index < this->introspection().n_chemical_composition_fields(),
+                  ExcMessage("Adjoint/Optimization/Control field must be `temperature` or "
+                             "the name of a chemical composition field."));
+      return AdvectionField::composition(compositional_index);
+    }
+
+
+
+    template <int dim>
+    ComponentMask
+    Manager<dim>::optimization_control_component_mask() const
+    {
+      const AdvectionField field = optimization_control_field();
+      return field.is_temperature()
+             ? this->introspection().component_masks.temperature
+             : this->introspection().component_masks.compositional_fields[field.compositional_variable];
+    }
+
+
+
+    template <int dim>
     void
     Manager<dim>::capture_optimization_initial_state()
     {
@@ -74,11 +105,12 @@ namespace aspect
       // constraints, and solver-failure counters; otherwise J(c) would depend
       // on callback order rather than only on the control c.
       simulator->compute_current_constraints();
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
-      initial_temperature_optimization.fixed_temperature = std::make_unique<LinearAlgebra::Vector>(
-                                                             this->introspection().index_sets.system_partitioning[temperature_block],
-                                                             this->get_mpi_communicator());
-      *initial_temperature_optimization.fixed_temperature = simulator->solution.block(temperature_block);
+      const AdvectionField control_field = optimization_control_field();
+      const unsigned int temperature_block = control_field.block_index(this->introspection());
+      initial_temperature_optimization.fixed_control_field = std::make_unique<LinearAlgebra::Vector>(
+                                                               this->introspection().index_sets.system_partitioning[temperature_block],
+                                                               this->get_mpi_communicator());
+      *initial_temperature_optimization.fixed_control_field = simulator->solution.block(temperature_block);
 
       initial_temperature_optimization.canonical_state.solution = simulator->solution;
       initial_temperature_optimization.canonical_state.old_solution = simulator->old_solution;
@@ -175,13 +207,14 @@ namespace aspect
     Manager<dim>::ensure_initial_temperature_control_space()
     {
       AssertThrow(initial_temperature_optimization.canonical_state.captured
-                  && initial_temperature_optimization.fixed_temperature != nullptr,
+                  && initial_temperature_optimization.fixed_control_field != nullptr,
                   ExcMessage("Initial-temperature control space requires a captured O3 baseline."));
 
       // The control map depends on the current DoF partition and constraint
       // graph. Build it lazily after canonical restore and keep it for later
       // evaluations because optimization is restricted to a fixed mesh.
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const AdvectionField control_field = optimization_control_field();
+      const unsigned int temperature_block = control_field.block_index(this->introspection());
       simulator->compute_current_constraints();
       if (initial_temperature_optimization.control_space == nullptr)
         {
@@ -190,7 +223,7 @@ namespace aspect
             temperature_block_first_dof += this->introspection().system_dofs_per_block[block];
           initial_temperature_optimization.control_space = std::make_unique<InitialTemperatureControl<dim>>(
                                                              simulator->dof_handler,
-                                                             this->introspection().component_masks.temperature,
+                                                             optimization_control_component_mask(),
                                                              simulator->current_constraints,
                                                              this->get_mpi_communicator(),
                                                              temperature_block_first_dof,
@@ -269,14 +302,15 @@ namespace aspect
     {
       ensure_initial_temperature_control_space();
 
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const AdvectionField control_field = optimization_control_field();
+      const unsigned int temperature_block = control_field.block_index(this->introspection());
       LinearAlgebra::Vector controlled_temperature(
         this->introspection().index_sets.system_partitioning[temperature_block],
         this->get_mpi_communicator());
-      // Install T_0(c)=T_fixed+P c, including physical inhomogeneous boundary
+      // Install q_0(c)=q_fixed+P c, including physical inhomogeneous boundary
       // rows. The reduced control never overwrites prescribed Dirichlet data.
       initial_temperature_optimization.control_space->inject_physical(
-        control, *initial_temperature_optimization.fixed_temperature, controlled_temperature);
+        control, *initial_temperature_optimization.fixed_control_field, controlled_temperature);
       // solution is a ghosted read vector in distributed ASPECT runs. Build
       // the control in owned-only storage and use the normal ASPECT transfer
       // into that ghosted block instead of writing through its ghost map.
@@ -284,14 +318,14 @@ namespace aspect
 
       // The initial BDF history represents the same controlled physical
       // state. Rebuilding it from the installed state avoids carrying a
-      // previous trial's temperature into the first accepted step.
+      // previous trial's selected field into the first accepted step.
       simulator->old_solution.block(temperature_block) = simulator->solution.block(temperature_block);
       simulator->old_old_solution.block(temperature_block) = simulator->solution.block(temperature_block);
       simulator->current_linearization_point.block(temperature_block) =
         simulator->solution.block(temperature_block);
       simulator->compute_initial_pressure_field();
       // Pressure and the nonlinear linearization point depend on the newly
-      // controlled temperature. Reinitialize them before the first Stokes
+      // controlled scalar field. Reinitialize them before the first Stokes
       // solve rather than carrying values from the canonical baseline.
       simulator->initialize_current_linearization_point();
       simulator->rebuild_sparsity_and_matrices = true;
@@ -309,15 +343,15 @@ namespace aspect
       AssertThrow(initial_temperature_optimization.canonical_state.captured,
                   ExcMessage("An optimization baseline must be captured before replacing "
                              "its physical initial temperature."));
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const unsigned int temperature_block = optimization_control_field().block_index(this->introspection());
       const auto &owned = this->introspection().index_sets.system_partitioning[temperature_block];
       AssertThrow(baseline.size() == owned.size()
                   && baseline.locally_owned_elements() == owned,
                   ExcMessage("The replacement initial-temperature baseline has an "
                              "incompatible block layout."));
-      initial_temperature_optimization.fixed_temperature = std::make_unique<LinearAlgebra::Vector>(owned,
-                                                           this->get_mpi_communicator());
-      *initial_temperature_optimization.fixed_temperature = baseline;
+      initial_temperature_optimization.fixed_control_field = std::make_unique<LinearAlgebra::Vector>(owned,
+                                                             this->get_mpi_communicator());
+      *initial_temperature_optimization.fixed_control_field = baseline;
     }
 
 
@@ -326,9 +360,9 @@ namespace aspect
     const LinearAlgebra::Vector &
     Manager<dim>::get_optimization_initial_temperature_baseline() const
     {
-      AssertThrow(initial_temperature_optimization.fixed_temperature != nullptr,
+      AssertThrow(initial_temperature_optimization.fixed_control_field != nullptr,
                   ExcMessage("No physical initial-temperature baseline is installed."));
-      return *initial_temperature_optimization.fixed_temperature;
+      return *initial_temperature_optimization.fixed_control_field;
     }
 
 
@@ -352,7 +386,7 @@ namespace aspect
                                     this->get_mpi_communicator());
       control = 0.0;
       types::global_dof_index temperature_first_dof = 0;
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const unsigned int temperature_block = optimization_control_field().block_index(this->introspection());
       for (unsigned int block = 0; block < temperature_block; ++block)
         temperature_first_dof += this->introspection().system_dofs_per_block[block];
       for (const auto local_index : temperature_owned)
@@ -367,7 +401,7 @@ namespace aspect
           AssertThrow(control.locally_owned_elements().is_element(expansion.front().first),
                       ExcInternalError());
           control[expansion.front().first] =
-            temperature[local_index] - (*initial_temperature_optimization.fixed_temperature)[local_index];
+            temperature[local_index] - (*initial_temperature_optimization.fixed_control_field)[local_index];
         }
       control.compress(VectorOperation::insert);
       return control;
@@ -381,8 +415,8 @@ namespace aspect
     {
       ensure_initial_temperature_control_space();
       const auto &control_space = *initial_temperature_optimization.control_space;
-      // Physical nondimensional bounds 0<=T_fixed+c<=1 translate on every
-      // free coordinate to -T_fixed<=c<=1-T_fixed. Constraint-dependent rows
+      // Physical nondimensional bounds 0<=q_fixed+c<=1 translate on every
+      // free coordinate to -q_fixed<=c<=1-q_fixed. Constraint-dependent rows
       // carry no independent box bound because they are not control DoFs.
       LinearAlgebra::Vector lower(control_space.locally_owned_control_dofs(),
                                   this->get_mpi_communicator());
@@ -391,7 +425,7 @@ namespace aspect
       lower = 0.0;
       upper = 0.0;
       types::global_dof_index temperature_first_dof = 0;
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const unsigned int temperature_block = optimization_control_field().block_index(this->introspection());
       for (unsigned int block = 0; block < temperature_block; ++block)
         temperature_first_dof += this->introspection().system_dofs_per_block[block];
       for (const auto local_index : control_space.temperature_block_owned_dofs())
@@ -403,8 +437,8 @@ namespace aspect
           AssertThrow(expansion.size() == 1 && expansion.front().second == 1.0,
                       ExcMessage("A free initial-temperature DoF must map directly "
                                  "to one reduced control coefficient."));
-          lower[expansion.front().first] = -(*initial_temperature_optimization.fixed_temperature)[local_index];
-          upper[expansion.front().first] = 1.0 - (*initial_temperature_optimization.fixed_temperature)[local_index];
+          lower[expansion.front().first] = -(*initial_temperature_optimization.fixed_control_field)[local_index];
+          upper[expansion.front().first] = 1.0 - (*initial_temperature_optimization.fixed_control_field)[local_index];
         }
       lower.compress(VectorOperation::insert);
       upper.compress(VectorOperation::insert);
@@ -422,7 +456,7 @@ namespace aspect
       LinearAlgebra::Vector physical(initial_temperature_optimization.control_space->temperature_block_owned_dofs(),
                                      this->get_mpi_communicator());
       initial_temperature_optimization.control_space->inject_physical(control,
-                                                                      *initial_temperature_optimization.fixed_temperature,
+                                                                      *initial_temperature_optimization.fixed_control_field,
                                                                       physical);
       return {physical.min(), physical.max()};
     }
@@ -434,10 +468,11 @@ namespace aspect
     Manager<dim>::temperature_l2_difference(const LinearAlgebra::Vector &first,
                                             const LinearAlgebra::Vector &second) const
     {
-      // Evaluate ||T_a-T_b||_L2 by FE quadrature, not by the coefficient-vector
+      // Evaluate the selected field's L2 difference by FE quadrature, not by the coefficient-vector
       // Euclidean norm. This makes reconstruction diagnostics invariant under
       // basis scaling and mesh-cell volume.
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const AdvectionField control_field = optimization_control_field();
+      const unsigned int temperature_block = control_field.block_index(this->introspection());
       LinearAlgebra::BlockVector difference = simulator->solution;
       difference.block(temperature_block) = first;
       difference.block(temperature_block) -= second;
@@ -451,7 +486,7 @@ namespace aspect
         if (cell->is_locally_owned())
           {
             fe_values.reinit(cell);
-            fe_values[this->introspection().extractors.temperature].get_function_values(
+            fe_values[control_field.scalar_extractor(this->introspection())].get_function_values(
               difference, values);
             for (unsigned int q = 0; q < quadrature.size(); ++q)
               local_norm_squared += values[q] * values[q] * fe_values.JxW(q);
@@ -473,9 +508,172 @@ namespace aspect
         initial_temperature_optimization.control_space->temperature_block_owned_dofs(),
         this->get_mpi_communicator());
       initial_temperature_optimization.control_space->inject_physical(control,
-                                                                      *initial_temperature_optimization.fixed_temperature,
+                                                                      *initial_temperature_optimization.fixed_control_field,
                                                                       reconstructed);
       return temperature_l2_difference(reconstructed, temperature);
+    }
+
+
+
+    template <int dim>
+    std::map<std::string, double>
+    Manager<dim>::complete_instantaneous_initial_field_gradient(
+      LinearAlgebra::Vector &l2_gradient)
+    {
+      AssertThrow(instantaneous_stokes_workflow_enabled()
+                  && initial_temperature_optimization.control_space != nullptr,
+                  ExcMessage("A completed instantaneous-Stokes forward evaluation is required "
+                             "before its reduced initial-field gradient can be requested."));
+
+      const AdvectionField control_field = optimization_control_field();
+      LinearAlgebra::BlockVector field_adjoint(
+        this->introspection().index_sets.system_partitioning,
+        this->introspection().index_sets.system_relevant_partitioning,
+        this->get_mpi_communicator());
+      field_adjoint = 0.0;
+
+      // The instantaneous workflow has already solved one physical Stokes
+      // transpose for every active objective. Reuse those states to apply the
+      // material VJP S_q^T instead of solving another adjoint system.
+      ForwardStateView<dim> snapshot(simulator->solution,
+                                     simulator->old_solution,
+                                     simulator->old_old_solution,
+                                     simulator->current_linearization_point,
+                                     simulator->current_linearization_point,
+                                     simulator->time,
+                                     simulator->time_step,
+                                     simulator->old_time_step,
+                                     simulator->timestep_number);
+      snapshot.constraints.copy_from(simulator->current_constraints);
+      snapshot.pressure_normalization_adjustment =
+        simulator->last_pressure_normalization_adjustment;
+      for (const auto &state : adjoint_states)
+        {
+          // Instantaneous objectives solve A^T z=J_x, whereas the reusable
+          // Stokes-field helper is formulated for the b-Ax reverse residual.
+          // Its test vector is therefore -z for this objective convention.
+          LinearAlgebra::BlockVector reverse_stokes_state = state->solution;
+          reverse_stokes_state *= -1.0;
+          add_stokes_rhs_field_transpose(control_field, snapshot,
+                                         reverse_stokes_state, field_adjoint);
+        }
+
+      // Some surface/geoid functionals depend explicitly on density or
+      // viscosity in addition to their implicit Stokes-state path. Their
+      // cellwise kernels are a piecewise-constant representation, so project
+      // that documented representation through the same material VJP.
+      add_instantaneous_direct_kernel_field_transpose(control_field, field_adjoint);
+
+      const unsigned int block = control_field.block_index(this->introspection());
+      LinearAlgebra::Vector reduced_covector(
+        initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+        this->get_mpi_communicator());
+      // field_adjoint is ghosted because the material VJP and the direct
+      // cell-kernel projection assemble into ASPECT's system-block layout.
+      // P^T, by contrast, owns every input coefficient exactly once. Copying
+      // only the owned entries realizes that required layout without writing
+      // through the ghost map.
+      LinearAlgebra::Vector owned_field_covector(
+        initial_temperature_optimization.control_space->temperature_block_owned_dofs(),
+        this->get_mpi_communicator());
+      for (const auto index : owned_field_covector.locally_owned_elements())
+        owned_field_covector[index] = field_adjoint.block(block)[index];
+      owned_field_covector.compress(VectorOperation::insert);
+      initial_temperature_optimization.control_space->restrict_covector(
+        owned_field_covector, reduced_covector);
+      const QGauss<dim> mass_quadrature(simulator->dof_handler.get_fe().degree + 1);
+      initial_temperature_optimization.control_space->assemble_mass_matrix(*simulator->mapping,
+                                                                            mass_quadrature);
+      l2_gradient.reinit(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
+                         this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->solve_l2_riesz(reduced_covector,
+                                                                       l2_gradient);
+      return get_objective_values();
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::add_instantaneous_direct_kernel_field_transpose(
+      const AdvectionField &advection_field,
+      LinearAlgebra::BlockVector &field_adjoint) const
+    {
+      const auto &contributions = kernels.contributions();
+      if (contributions.empty())
+        return;
+
+      const Quadrature<dim> &quadrature_formula =
+        this->introspection().quadratures.velocities;
+      const unsigned int dofs_per_cell = this->get_fe().dofs_per_cell;
+      const unsigned int field_component =
+        advection_field.component_index(this->introspection());
+      const FEValuesExtractors::Scalar field_extractor =
+        advection_field.scalar_extractor(this->introspection());
+      FEValues<dim> fe_values(this->get_mapping(), this->get_fe(), quadrature_formula,
+                              update_values | update_gradients | update_quadrature_points |
+                              update_JxW_values);
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+      Vector<double> local_field_adjoint(dofs_per_cell);
+
+      for (const auto &cell : this->get_dof_handler().active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int cell_index = cell->active_cell_index();
+            double density_seed = 0.0;
+            double viscosity_seed = 0.0;
+            for (const auto &entry : contributions)
+              {
+                // The implicit Stokes material path is represented exactly by
+                // the already available physical adjoint above. Only add the
+                // objective-owned direct terms here.
+                if (entry.first.physics_term_name == "incompressible Stokes volume")
+                  continue;
+                if (entry.first.property == PhysicalProperty::density)
+                  density_seed += entry.second(cell_index);
+                else if (entry.first.property == PhysicalProperty::viscosity)
+                  viscosity_seed += entry.second(cell_index);
+              }
+            if (density_seed == 0.0 && viscosity_seed == 0.0)
+              continue;
+
+            fe_values.reinit(cell);
+            cell->get_dof_indices(local_dof_indices);
+            MaterialModel::MaterialModelInputs<dim> in(
+              fe_values, cell, this->introspection(), simulator->current_linearization_point);
+            MaterialModel::MaterialModelOutputs<dim> out(
+              fe_values.n_quadrature_points, this->n_compositional_fields());
+            in.requested_properties =
+              static_cast<MaterialModel::MaterialProperties::Property>(
+                static_cast<int>(MaterialModel::MaterialProperties::density)
+                | static_cast<int>(MaterialModel::MaterialProperties::viscosity));
+            this->get_material_model().evaluate(in, out);
+
+            MaterialModelOutputAdjoints<dim> bar_out(fe_values.n_quadrature_points);
+            MaterialModelInputAdjoints<dim> bar_in(fe_values.n_quadrature_points,
+                                                   this->n_compositional_fields());
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                bar_out.densities[q] = density_seed * fe_values.JxW(q);
+                bar_out.viscosities[q] = viscosity_seed * fe_values.JxW(q);
+              }
+            MaterialModelAdjoint<dim>(*simulator).apply_derivative_transpose(in, out,
+                                                                              bar_out, bar_in);
+
+            local_field_adjoint = 0.0;
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              {
+                const double seed = advection_field.is_temperature()
+                                    ? bar_in.temperature[q]
+                                    : bar_in.composition[q][advection_field.compositional_variable];
+                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                  if (this->get_fe().system_to_component_index(i).first == field_component)
+                    local_field_adjoint(i) += seed * fe_values[field_extractor].value(i, q);
+              }
+            this->get_current_constraints().distribute_local_to_global(
+              local_field_adjoint, local_dof_indices, field_adjoint);
+          }
+      field_adjoint.compress(VectorOperation::add);
     }
 
 
@@ -486,9 +684,10 @@ namespace aspect
       const LinearAlgebra::Vector &control,
       LinearAlgebra::Vector *l2_gradient)
     {
-      AssertThrow(time_dependent_temperature_workflow_enabled(),
-                  ExcMessage("Initial-temperature control evaluation requires the "
-                             "time-dependent temperature adjoint workflow."));
+      AssertThrow(time_dependent_temperature_workflow_enabled()
+                  || instantaneous_stokes_workflow_enabled(),
+                  ExcMessage("Initial-temperature control evaluation requires either the "
+                             "time-dependent temperature or instantaneous-Stokes adjoint workflow."));
       AssertThrow(initial_temperature_optimization.canonical_state.captured,
                   ExcMessage("Initial-temperature control evaluation requires a "
                              "captured O3 baseline."));
@@ -501,10 +700,18 @@ namespace aspect
                   ExcMessage("Reusable in-memory control evaluation requires a fixed mesh."));
 
       // One reduced value evaluation is a deterministic transaction:
-      // restore canonical state -> install T_0(c) -> run the complete forward
+      // restore canonical state -> install q_0(c) -> run the complete forward
       // time loop -> either retain its trajectory or immediately reverse it.
       restore_optimization_initial_state();
       install_initial_temperature_control(control);
+
+      if (instantaneous_stokes_workflow_enabled())
+        {
+          solve_instantaneous_stokes();
+          if (l2_gradient == nullptr)
+            return get_objective_values();
+          return complete_instantaneous_initial_field_gradient(*l2_gradient);
+        }
 
       unsigned int max_refinement_level = this->get_parameters().initial_global_refinement
                                           + this->get_parameters().initial_adaptive_refinement;
@@ -533,6 +740,9 @@ namespace aspect
     Manager<dim>::complete_initial_temperature_control_gradient(
       LinearAlgebra::Vector &l2_gradient)
     {
+      if (instantaneous_stokes_workflow_enabled())
+        return complete_instantaneous_initial_field_gradient(l2_gradient);
+
       AssertThrow(time_dependent_temperature_workflow_enabled()
                   && initial_temperature_optimization.control_space != nullptr,
                   ExcMessage("A completed initial-temperature forward evaluation is required "
@@ -553,22 +763,98 @@ namespace aspect
         }
       suppress_evaluation_side_effects = false;
 
-      // The reverse sweep returns a full-space covector dJ/dT_0. First apply
+      // The reverse sweep returns a full-space covector dJ/dq_0. First apply
       // P^T to obtain the reduced covector, then solve
-      // (P^T M_T P) g=P^T dJ/dT_0 for the L2 Riesz representative expected by
+      // (P^T M_q P) g=P^T dJ/dq_0 for the L2 Riesz representative expected by
       // ROLReducedL2Vector.
       l2_gradient.reinit(initial_temperature_optimization.control_space->locally_owned_control_dofs(),
                          this->get_mpi_communicator());
       LinearAlgebra::Vector reduced_covector(
         initial_temperature_optimization.control_space->locally_owned_control_dofs(),
         this->get_mpi_communicator());
-      const unsigned int temperature_block = this->introspection().block_indices.temperature;
+      const AdvectionField control_field = optimization_control_field();
+      const unsigned int temperature_block = control_field.block_index(this->introspection());
       initial_temperature_optimization.control_space->restrict_covector(
-        time_dependent_workflow.initial_temperature_gradient.block(temperature_block), reduced_covector);
+        (control_field.is_temperature()
+         ? time_dependent_workflow.initial_temperature_gradient
+         : time_dependent_workflow.initial_composition_gradients.at(control_field.compositional_variable))
+        .block(temperature_block), reduced_covector);
       const QGauss<dim> mass_quadrature(simulator->dof_handler.get_fe().degree + 1);
       initial_temperature_optimization.control_space->assemble_mass_matrix(*simulator->mapping, mass_quadrature);
       initial_temperature_optimization.control_space->solve_l2_riesz(reduced_covector, l2_gradient);
       return get_objective_values();
+    }
+
+
+
+    template <int dim>
+    void
+    Manager<dim>::write_accepted_optimization_control(
+      const LinearAlgebra::Vector &control,
+      const unsigned int iteration) const
+    {
+      if (!initial_temperature_optimization.output_accepted_controls)
+        return;
+
+      AssertThrow(initial_temperature_optimization.canonical_state.captured
+                  && initial_temperature_optimization.control_space != nullptr
+                  && initial_temperature_optimization.fixed_control_field != nullptr,
+                  ExcMessage("Accepted-control output requires an initialized reduced control space."));
+      AssertThrow(this->get_parameters().include_melt_transport == false,
+                  ExcMessage("Accepted-control VTK output currently supports the fixed-mesh "
+                             "temperature/composition optimization workflow without melt transport."));
+
+      const AdvectionField control_field = optimization_control_field();
+      const unsigned int block = control_field.block_index(this->introspection());
+      LinearAlgebra::Vector physical(
+        this->introspection().index_sets.system_partitioning[block],
+        this->get_mpi_communicator());
+      initial_temperature_optimization.control_space->inject_physical(
+        control, *initial_temperature_optimization.fixed_control_field, physical);
+
+      LinearAlgebra::BlockVector state = initial_temperature_optimization.canonical_state.solution;
+      state.block(block) = physical;
+
+      DataOut<dim> data_out;
+      data_out.attach_dof_handler(this->get_dof_handler());
+      std::vector<std::string> names(dim, "velocity");
+      std::vector<DataComponentInterpretation::DataComponentInterpretation> interpretation(
+        dim, DataComponentInterpretation::component_is_part_of_vector);
+      names.emplace_back("p");
+      names.emplace_back("T");
+      interpretation.emplace_back(DataComponentInterpretation::component_is_scalar);
+      interpretation.emplace_back(DataComponentInterpretation::component_is_scalar);
+      for (unsigned int c = 0; c < this->introspection().n_compositional_fields; ++c)
+        {
+          names.emplace_back(this->introspection().name_for_compositional_index(c));
+          interpretation.emplace_back(DataComponentInterpretation::component_is_scalar);
+        }
+      AssertDimension(names.size(), this->introspection().n_components);
+      data_out.add_data_vector(state,
+                               names,
+                               DataOut<dim>::type_dof_data,
+                               interpretation);
+      data_out.build_patches(control_field.polynomial_degree(this->introspection()));
+      DataOutBase::VtkFlags flags;
+      flags.cycle = iteration;
+      flags.time = initial_temperature_optimization.canonical_state.time;
+      data_out.set_flags(flags);
+
+      const std::string directory = this->get_output_directory()
+                                    + "diagnostics/accepted_controls/";
+      Utilities::create_directory(directory, this->get_mpi_communicator(), true);
+      const std::string filename = directory + "initial_"
+                                   + (control_field.is_temperature()
+                                      ? std::string("temperature")
+                                      : std::string("composition"))
+                                   + "_iter_"
+                                   + Utilities::int_to_string(iteration, 3)
+                                   + ".vtu";
+      data_out.write_vtu_in_parallel(filename, this->get_mpi_communicator());
+      this->get_pcout() << "ASPECT_OPTIMIZATION_CONTROL_OUTPUT field="
+                        << control_field.name(this->introspection())
+                        << " iteration=" << iteration
+                        << " file=" << filename << std::endl;
     }
 
 
@@ -874,9 +1160,9 @@ namespace aspect
                         << simulator->solution.block(temperature_block).size()
                         << " solution_temperature_owned="
                         << simulator->solution.block(temperature_block).locally_owned_elements().n_elements()
-                        << " fixed_temperature_size=" << initial_temperature_optimization.fixed_temperature->size()
+                        << " fixed_temperature_size=" << initial_temperature_optimization.fixed_control_field->size()
                         << " fixed_temperature_owned="
-                        << initial_temperature_optimization.fixed_temperature->locally_owned_elements().n_elements()
+                        << initial_temperature_optimization.fixed_control_field->locally_owned_elements().n_elements()
                         << std::endl;
       if (stage == 4)
         return;
@@ -885,7 +1171,7 @@ namespace aspect
         this->introspection().index_sets.system_partitioning[temperature_block],
         this->get_mpi_communicator());
       initial_temperature_optimization.control_space->inject_physical(
-        control, *initial_temperature_optimization.fixed_temperature, controlled_temperature);
+        control, *initial_temperature_optimization.fixed_control_field, controlled_temperature);
       simulator->solution.block(temperature_block) = controlled_temperature;
       report_stage_memory("D5");
       this->get_pcout() << "ASPECT_O3_INIT_DIAGNOSTIC stage=5 physical-injection" << std::endl;

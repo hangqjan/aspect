@@ -42,8 +42,18 @@ namespace aspect
     {}
 
     template <int dim>
+    void DynamicTopographyObjective<dim>::initialize_simulator(const Simulator<dim> &simulator)
+    {
+      Objective::Interface<dim>::initialize_simulator(simulator);
+      observation.initialize_simulator(simulator);
+      observation.set_native_quantity(Observation::SurfaceFieldObservation<dim>::NativeQuantity::dynamic_topography);
+    }
+
+    template <int dim>
     double DynamicTopographyObjective<dim>::target_topography (const Point<dim> &position) const
     {
+      if (target_topography_model == "file")
+        return observation.value(position);
       if (target_topography_model == "function")
         {
           const Utilities::NaturalCoordinate<dim> point =
@@ -65,6 +75,8 @@ namespace aspect
     template <int dim>
     double DynamicTopographyObjective<dim>::evaluate() const
     {
+      if (target_topography_model == "file")
+        observation.initialize();
       const auto &dynamic_topography = this->get_postprocess_manager().template
                                        get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
       AssertThrow(dynamic_topography.topography_vector().size() != 0,
@@ -106,6 +118,8 @@ namespace aspect
       LinearAlgebra::BlockVector &topography_adjoint, double &top_area,
       double &surface_pressure_weight) const
     {
+      if (target_topography_model == "file")
+        observation.initialize();
       const auto &dynamic_topography = this->get_postprocess_manager().template
                                        get_matching_active_plugin<Postprocess::DynamicTopography<dim>>();
       AssertThrow(dynamic_topography.topography_vector().size() != 0,
@@ -230,7 +244,7 @@ namespace aspect
       {
         prm.enter_subsection ("Dynamic topography");
         {
-          prm.declare_entry ("Target topography model", "none", Patterns::Selection ("none|function"),
+          prm.declare_entry ("Target topography model", "none", Patterns::Selection ("none|function|file"),
                              "The model used to prescribe the target dynamic topography. The dynamic topography "
                              "objective evaluates one half of the squared misfit between the computed and target "
                              "topography. A target topography model is required when this objective is used.");
@@ -245,6 +259,11 @@ namespace aspect
             prm.declare_entry ("Variable names", dim == 2 ? "r,phi" : "r,phi,theta", Patterns::Anything(),
                                "Names of the coordinates used in the target topography function.");
             prm.declare_entry ("Function expression", "", Patterns::Anything(), "Target dynamic topography in meters.");
+          }
+          prm.leave_subsection();
+          prm.enter_subsection("Observation");
+          {
+            Observation::SurfaceFieldObservation<dim>::declare_parameters(prm);
           }
           prm.leave_subsection();
         }
@@ -284,6 +303,17 @@ namespace aspect
                   throw;
                 }
               prm.leave_subsection();
+            }
+          else if (target_topography_model == "file")
+            {
+              prm.enter_subsection("Observation");
+              {
+                observation.parse_parameters(prm);
+              }
+              prm.leave_subsection();
+              AssertThrow(observation.uses_file_source(),
+                          ExcMessage("Dynamic-topography Target topography model=file requires "
+                                     "Observation source=file."));
             }
           else
             AssertThrow (false, ExcNotImplemented());

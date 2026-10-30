@@ -1,0 +1,53 @@
+# Recover the G-ADOPT-equivalent initial chemical field from its terminal
+# composition observation. This is provided for the twin stage; no full run is
+# started by this input alone.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/reference_forward.prm
+
+set Output directory        = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/results_70to80/inverse
+set Nonlinear solver scheme = single Advection, single Stokes, adjoint temperature
+
+subsection Termination criteria
+  # Match the TD-GADOPT inverse window: infer the reference state at step 70
+  # from its terminal composition at step 80, using ten transitions.
+  set End step = 10
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization
+end
+
+subsection Initial composition model
+  set Model name = gadopt composition initial
+  subsection Gadopt composition initial
+    # Start from the unperturbed background profile; the reference adds the
+    # localized 0.1-amplitude anomaly at (0.5, 0.2).
+    set Include localized anomaly = false
+  end
+end
+
+subsection Adjoint
+  set Solve mode         = optimize
+  set List of objectives = composition field
+  subsection Composition field
+    set Field name         = chemical
+    set Coordinate system  = cartesian
+    set Observation source = file
+    subsection Observation file
+      set Data directory  = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/results_70to80/reference
+      set Data file name  = terminal_composition.txt
+    end
+    subsection Weight function
+      set Variable names      = x,y
+      set Function expression = 1
+    end
+  end
+  subsection Optimization
+    set Control field                   = chemical
+    set Maximum iterations              = 12
+    set Initial trust-region radius     = 1e-3
+    set L-BFGS history size             = 3
+    set Use physical temperature bounds = true
+    set Output accepted controls        = true
+  end
+end

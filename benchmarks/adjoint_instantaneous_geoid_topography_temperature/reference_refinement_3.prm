@@ -1,0 +1,11 @@
+# Resolution-study reference. Keep the physical model and l=2 observation
+# content identical to reference.prm while refining the fixed 3-D mesh.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/reference.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-3/reference
+
+subsection Mesh refinement
+  set Initial global refinement = 3
+  set Initial adaptive refinement = 0
+  set Time steps between mesh refinement = 0
+end

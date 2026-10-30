@@ -1,0 +1,17 @@
+# Exact native forward values for SG0's l=2 model.  Derived fixtures subtract
+# one selected coefficient, producing a unit q_x basis seed with W=1.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_geoid_density/sg2_mixed.prm
+
+subsection Adjoint
+  subsection Self-gravitating geoid
+    set Observed surface topography cosine coefficients = -7.7783742070864781, -1.5471303268128088e-08, -2.1034844104975606e-09
+    set Observed surface topography sine coefficients = 0, 1.1239848038549566e-08, -3.5133583117042357e-09
+    set Observed CMB topography cosine coefficients = -2.6909301899580838, 1.4259152290038263e-08, -1.2279265508789585e-09
+    set Observed CMB topography sine coefficients = 0, 2.5483446748091452e-09, -6.7122989348548807e-09
+    set Observed surface geoid cosine coefficients = -4.0957269885558976, -4.2218901582501458e-09, -5.3205328719022567e-10
+    set Observed surface geoid sine coefficients = 0, 4.7879746494517875e-09, -1.3238788320106403e-09
+    set Observed CMB geoid cosine coefficients = -2.3523760833464173, 4.3015573392921153e-09, -6.2503220527426441e-10
+    set Observed CMB geoid sine coefficients = 0, 2.3020013894956013e-09, -2.6119431629076805e-09
+    set Coefficient weights = 1, 1, 1
+  end
+end

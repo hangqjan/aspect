@@ -10,6 +10,7 @@
 /compile_commands.json
 /.vscode/
 /.cache/
+/.matplotlib-cache/
 **/.DS_Store
 /AspectConfig.cmake
 /CMakeLists.txt.user*
@@ -26,6 +27,8 @@
 /benchmarks/**/aspect-debug
 /benchmarks/**/aspect-release
 /benchmarks/**/temp.prm
+/benchmarks/adjoint_*/results*/
+/benchmarks/adjoint_*/*.log
 /benchmarks/tangurnis/*/*csv
 /benchmarks/tangurnis/*/solution*
 /build*/

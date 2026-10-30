@@ -1,0 +1,9 @@
+# Smooth van Keken reference forward model at initial global refinement 5.
+# All physics and the terminal time are inherited from the refinement-7 case.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_van_keken_composition/reference_forward.prm
+
+set Output directory = output-adjoint-van-keken-reference-ref5
+
+subsection Mesh refinement
+  set Initial global refinement = 5
+end

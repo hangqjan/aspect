@@ -1,0 +1,150 @@
+# Composition counterpart of the scaled G-ADOPT mantle-convection reference.
+#
+# It retains the G-ADOPT background geometry, Q2/Q1 Stokes pair, free-slip
+# walls, unit gravity/viscosity, 80 fixed timesteps, and the analytic initial
+# profile. Chemical composition, not temperature, drives buoyancy and is the
+# terminal observation.
+
+set Additional shared libraries = $ASPECT_SOURCE_DIR/build-release/van-keken-terminal-composition-plugin/libterminal_composition_observation.release.so, $ASPECT_SOURCE_DIR/build-release/gadopt-composition-initial-plugin/libgadopt_composition_initial.release.so
+set Dimension                    = 2
+set Use years instead of seconds = false
+set Output directory             = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/results_70to80/reference
+set Pressure normalization       = surface
+set Surface pressure             = 0
+set Nonlinear solver scheme      = single Advection, single Stokes, adjoint temperature
+set Maximum time step            = 4
+set CFL number                   = 1
+
+subsection Discretization
+  set Stokes velocity polynomial degree = 2
+  set Temperature polynomial degree     = 1
+end
+
+subsection Time stepping
+  set List of model names = function
+  subsection Function
+    set Variable names      = time
+    set Function expression = 4
+  end
+end
+
+subsection Termination criteria
+  set Termination criteria = end step
+  set End step             = 80
+end
+
+subsection Adjoint
+  set Solve mode         = kernel
+  set List of objectives = composition field
+  subsection Composition field
+    set Field name         = chemical
+    set Coordinate system  = cartesian
+    set Observation source = function
+    subsection Target function
+      set Variable names      = x,y
+      set Function expression = 0
+    end
+    subsection Weight function
+      set Variable names      = x,y
+      set Function expression = 1
+    end
+  end
+  subsection Time dependent
+    set Trajectory anchor spacing = 1
+    set Trajectory cleanup policy = keep
+  end
+end
+
+subsection Formulation
+  set Formulation = Boussinesq approximation
+end
+
+subsection Geometry model
+  set Model name = box
+  subsection Box
+    set X extent = 1
+    set Y extent = 1
+    set Z extent = 1
+  end
+end
+
+subsection Initial temperature model
+  # Temperature remains neutral; chemical composition carries the analogue of
+  # the G-ADOPT thermal anomaly and is the only buoyancy-driving field.
+  set Model name = function
+  subsection Function
+    set Variable names      = x,y
+    set Function expression = 0
+  end
+end
+
+subsection Boundary temperature model
+  set Fixed temperature boundary indicators = bottom, top
+  subsection Box
+    set Bottom temperature = 0
+    set Top temperature    = 0
+  end
+end
+
+subsection Compositional fields
+  set Number of fields            = 1
+  set Names of fields             = chemical
+  set Types of fields             = chemical composition
+  set Compositional field methods = field
+end
+
+subsection Initial composition model
+  set Model name = gadopt composition initial
+end
+
+subsection Boundary velocity model
+  set Tangential velocity boundary indicators = left, right, bottom, top
+end
+
+subsection Gravity model
+  set Model name = vertical
+  subsection Vertical
+    set Magnitude = 1
+  end
+end
+
+subsection Material model
+  set Model name = simple
+  subsection Simple model
+    set Reference density                         = 1
+    set Reference specific heat                   = 1
+    set Reference temperature                     = 0
+    set Thermal conductivity                      = 1e-6
+    set Thermal expansion coefficient             = 0
+    set Viscosity                                 = 1
+    # rho = 1 - chemical. This is the exact buoyancy analogue of the
+    # G-ADOPT reference's rho = 1 - temperature for C_initial = T_initial.
+    set Density differential for compositional field 1 = -1
+  end
+end
+
+subsection Mesh refinement
+  set Initial adaptive refinement        = 0
+  set Initial global refinement          = 4
+  set Time steps between mesh refinement = 0
+end
+
+subsection Checkpointing
+  set Time between checkpoint  = 0
+  set Steps between checkpoint = 0
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization, terminal composition observation
+  subsection Visualization
+    set Time between graphical output = 0
+  end
+  subsection Terminal composition observation
+    set Composition field name = chemical
+    set Samples in x           = 129
+    set Samples in y           = 129
+    set Box x extent           = 1
+    set Box y extent           = 1
+    set Output file name       = terminal_composition.txt
+  end
+end

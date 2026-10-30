@@ -93,6 +93,20 @@ namespace aspect
       std::vector<std::unique_ptr<AdjointState>> &adjoint_states,
       KernelRepository<dim> &kernels)
     {
+      // An observation-generating reference may deliberately use the
+      // instantaneous forward solver without an adjoint objective. In that
+      // case the ordinary postprocessing stage writes its native products
+      // after this forward Stokes solve, and there is no RHS, transpose solve,
+      // or kernel to assemble.
+      if (objective_manager.get_active_plugins().empty())
+        {
+          simulator.assemble_and_solve_stokes();
+          objective_results.clear();
+          adjoint_states.clear();
+          kernels = KernelRepository<dim>();
+          return;
+        }
+
       validate_setup();
 
       // The steady computation graph is
@@ -110,8 +124,6 @@ namespace aspect
       simulator.assemble_and_solve_stokes();
       prepare_required_forward_postprocessors();
       objective_results = objective_manager.evaluate_and_assemble_right_hand_sides();
-      AssertThrow(!objective_results.empty(),
-                  ExcMessage("No instantaneous adjoint objective is active."));
 
       adjoint_states.clear();
       const auto &objectives = objective_manager.get_active_plugins();

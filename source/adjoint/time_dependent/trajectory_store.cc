@@ -698,10 +698,29 @@ namespace aspect
           if (!collective_cleanup_success(success)) return false;
           MPI_Offset existing_size = 0;
           success = MPI_File_get_size(file, &existing_size) == MPI_SUCCESS;
+          // MPI_File_get_size is independent, but every operation below is
+          // collective on @p communicator. In particular, MPI_File_set_size
+          // must be called by every rank with the same size. Do not branch on
+          // a rank-local observation of the current size: an inconsistent
+          // branch would leave one rank in File_set_size while another enters
+          // the next allreduce in collective_cleanup_success().
+          if (!collective_cleanup_success(success))
+            {
+              MPI_File_close(&file);
+              return false;
+            }
+          MPI_Offset global_existing_size = 0;
+          success = MPI_Allreduce(&existing_size, &global_existing_size, 1,
+                                  MPI_OFFSET, MPI_MAX, communicator) == MPI_SUCCESS;
+          if (!collective_cleanup_success(success))
+            {
+              MPI_File_close(&file);
+              return false;
+            }
           const MPI_Offset required_size = static_cast<MPI_Offset>(
                                              location.record_offset + location.total_size);
-          if (success && existing_size < required_size)
-            success = MPI_File_set_size(file, required_size) == MPI_SUCCESS;
+          const MPI_Offset target_size = std::max(global_existing_size, required_size);
+          success = MPI_File_set_size(file, target_size) == MPI_SUCCESS;
           if (!collective_cleanup_success(success))
             {
               MPI_File_close(&file);

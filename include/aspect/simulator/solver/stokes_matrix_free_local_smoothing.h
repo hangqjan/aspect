@@ -178,6 +178,9 @@ namespace aspect
 
       bool print_details;
 
+      /** Emit per-level state while building GMG mass diagonals. */
+      bool print_cold_rebuild_diagnostics;
+
       /**
        * If true, it will time the key components of this matrix-free implementation, such as
        * vmult of different matrices, solver IDR with the cheap preconditioner, etc.
@@ -229,6 +232,11 @@ namespace aspect
       MGConstrainedDoFs mg_constrained_dofs_A_block;
       MGConstrainedDoFs mg_constrained_dofs_Schur_complement;
       MGConstrainedDoFs mg_constrained_dofs_projection;
+
+      // Exact cardinalities of the constraints passed to MatrixFree on each
+      // level. They are runtime-only diagnostics for cold GMG rebuilds.
+      std::vector<std::size_t> mg_level_constraint_counts_A_block;
+      std::vector<std::size_t> mg_level_constraint_counts_Schur_complement;
 
       MGTransferMF<dim,GMGNumberType> mg_transfer_A_block;
       MGTransferMF<dim,GMGNumberType> mg_transfer_Schur_complement;

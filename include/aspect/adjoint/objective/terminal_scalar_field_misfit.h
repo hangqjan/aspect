@@ -8,7 +8,7 @@
 #define _aspect_adjoint_objective_terminal_scalar_field_misfit_h
 
 #include <aspect/adjoint/objective/objective_functional.h>
-#include <aspect/adjoint/observation/volume_field_observation.h>
+#include <aspect/adjoint/observation/full_field_observation.h>
 
 #include <deal.II/base/parsed_function.h>
 
@@ -46,7 +46,7 @@ namespace aspect
         static void declare_common_parameters(ParameterHandler &prm);
         void parse_common_parameters(ParameterHandler &prm);
 
-        mutable Observation::VolumeFieldObservation<dim> observation;
+        mutable Observation::FullFieldObservation<dim> observation;
         Functions::ParsedFunction<dim> weight_function;
         Utilities::Coordinates::CoordinateSystem coordinate_system;
 

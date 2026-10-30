@@ -1,0 +1,18 @@
+# Small two-step execution check for the reference exporter. This does not
+# replace the classic-resolution reference_forward.prm.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_van_keken_composition/reference_forward.prm
+
+set End time            = 0.02
+set Maximum time step    = 0.01
+set Output directory     = output-adjoint-van-keken-smoke-reference
+
+subsection Mesh refinement
+  set Initial global refinement = 3
+end
+
+subsection Postprocess
+  subsection Terminal composition observation
+    set Samples in x = 9
+    set Samples in y = 9
+  end
+end

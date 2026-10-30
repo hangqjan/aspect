@@ -2435,7 +2435,9 @@ namespace aspect
     // state before installing a new initial-temperature control; it never
     // relies on the initial-temperature plugin after this point.
     if (adjoint_manager != nullptr
-        && adjoint_manager->time_dependent_temperature_workflow_enabled()
+        && (adjoint_manager->time_dependent_temperature_workflow_enabled()
+            || (adjoint_manager->optimization_enabled()
+                && adjoint_manager->instantaneous_stokes_workflow_enabled()))
         && pre_refinement_step == parameters.initial_adaptive_refinement
         && !adjoint_manager->has_optimization_initial_state())
       adjoint_manager->capture_optimization_initial_state();
@@ -2457,12 +2459,15 @@ namespace aspect
           goto start_time_iteration;
         }
 
-    if (adjoint_manager != nullptr
-        && adjoint_manager->time_dependent_temperature_workflow_enabled())
-      if (adjoint_manager->optimization_enabled())
-        adjoint_manager->run_initial_temperature_optimization();
-      else
-        adjoint_manager->finalize_time_dependent_temperature();
+    if (adjoint_manager != nullptr)
+      {
+        if (adjoint_manager->optimization_enabled()
+            && (adjoint_manager->time_dependent_temperature_workflow_enabled()
+                || adjoint_manager->instantaneous_stokes_workflow_enabled()))
+          adjoint_manager->run_initial_temperature_optimization();
+        else if (adjoint_manager->time_dependent_temperature_workflow_enabled())
+          adjoint_manager->finalize_time_dependent_temperature();
+      }
 
     // we disable automatic summary printing so that it won't happen when
     // throwing an exception. Therefore, we have to do this manually here:

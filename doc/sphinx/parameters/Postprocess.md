@@ -9,7 +9,7 @@
 :name: parameters:Postprocess/List_20of_20postprocessors
 **Default value:**
 
-**Pattern:** [MultipleSelection ODE statistics|Stokes residual|basic statistics|boundary densities|boundary pressures|boundary strain rate residual statistics|boundary velocity residual statistics|command|composition statistics|composition velocity statistics|core statistics|crystal preferred orientation|current surface|depth average|domain volume statistics|dynamic topography|entropy statistics|entropy viscosity statistics|fluid velocity statistics|geoid|global statistics|gravity calculation|heat flux densities|heat flux map|heat flux statistics|heating statistics|load balance statistics|mass flux statistics|material statistics|matrix statistics|maximum depth of field|melt statistics|memory statistics|mobility statistics|particle count statistics|particle distribution score|particle distribution statistics|particles|point values|pressure statistics|rotation statistics|sea level|spherical velocity statistics|temperature statistics|timing statistics|topography|velocity boundary statistics|velocity statistics|viscous dissipation statistics|visualization|volume of fluid statistics ]
+**Pattern:** [MultipleSelection ODE statistics|Stokes residual|adjoint kernels|basic statistics|boundary densities|boundary pressures|boundary strain rate residual statistics|boundary velocity residual statistics|command|composition statistics|composition velocity statistics|core statistics|crystal preferred orientation|current surface|depth average|domain volume statistics|dynamic topography|entropy statistics|entropy viscosity statistics|fluid velocity statistics|geoid|global statistics|gravity calculation|heat flux densities|heat flux map|heat flux statistics|heating statistics|load balance statistics|mass flux statistics|material statistics|matrix statistics|maximum depth of field|melt statistics|memory statistics|mobility statistics|particle count statistics|particle distribution score|particle distribution statistics|particles|point values|pressure statistics|rotation statistics|sea level|self-gravitating geoid|spherical velocity statistics|temperature statistics|timing statistics|topography|velocity boundary statistics|velocity statistics|viscous dissipation statistics|visualization|volume of fluid statistics ]
 
 **Documentation:** A comma separated list of postprocessor objects that should be run at the end of each time step. Some of these postprocessors will declare their own parameters which may, for example, include that they will actually do something only every so many time steps or years. Alternatively, the text &lsquo;all&rsquo; indicates that all available postprocessors should be run after each time step.
 
@@ -18,6 +18,8 @@ The following postprocessors are available:
 &lsquo;ODE statistics&rsquo;: A postprocessor that computes some statistics about ODEs solved during the model evolution, specifically, how many iterations are needed to solve these ODEs on average.
 
 &lsquo;Stokes residual&rsquo;: A postprocessor that outputs the Stokes residuals during the iterative solver algorithm into a file stokes_residuals.txt in the output directory.
+
+&lsquo;adjoint kernels&rsquo;: A postprocessor that writes adjoint kernel contributions assembled by the instantaneous Stokes adjoint workflow.
 
 &lsquo;basic statistics&rsquo;: A postprocessor that outputs some simplified statistics like the Rayleigh number and other quantities that only make sense in certain model setups. The output is written after completing initial adaptive refinement steps. The postprocessor assumes a point at the surface at the adiabatic surface temperature and pressure is a reasonable reference condition for computing these properties. Furthermore, the Rayleigh number is computed using the model depth (i.e. not the radius of the Earth), as we need a definition that is geometry independent. Take care when comparing these values to published studies and make sure they use the same definitions.
 
@@ -127,6 +129,8 @@ Evaluating the solution of a finite element field at arbitrarily chosen points i
 &lsquo;sea level&rsquo;: A postprocessor that computes the sea level for glacial isostatic adjustmentmodeling. When ice melts and enters the ocean, the ocean water needs to beredistributed in a gravitationally consistent way. With the updated surfaceloading (ocean and ice) the free surface deformation needs to be computediteratively before moving to the next time step. A postprocessor intended for use with a deforming top surface. After every step it computes the sea level based on the topography, ocean basin, ice melt, perturbed gravitational potential of the Earth model and gravitational potential of the ice load, relative to a reference datum (initial radius for a spherical shell geometry model). The sea level computation is based on {cite}`Martinec2018`. If the parameter &rsquo;Output to file&rsquo; in subsection &rsquo;Postprocess/Sea level&rsquo; (that is, the subsection corresponding to the current postprocessor) is set to true, this postprocessor also outputs sea level into text files named &lsquo;sea_level.NNNNN&rsquo; in the output directory, where NNNNN is the number of the time step.
 
 The file format then consists of lines with Euclidean coordinates followed by the corresponding sea level value. Sea level is printed/written in meters.
+
+&lsquo;self-gravitating geoid&rsquo;: Forward-only coupled self-gravitating geoid and dynamic-topography harmonics for spherical-shell models.
 
 &lsquo;spherical velocity statistics&rsquo;: A postprocessor that computes radial, tangential and total RMS velocity.
 
@@ -450,34 +454,6 @@ all|temperature|composition|adiabatic temperature|adiabatic pressure|adiabatic d
 ::::{dropdown} __Parameter:__ {ref}`Also output the gravity anomaly<parameters:Postprocess/Geoid/Also_20output_20the_20gravity_20anomaly>`
 :name: parameters:Postprocess/Geoid/Also_20output_20the_20gravity_20anomaly
 **Alias:** [Output gravity anomaly](parameters:Postprocess/Geoid/Output_20gravity_20anomaly)
-
-**Deprecation Status:** false
-::::
-
-::::{dropdown} __Parameter:__ {ref}`Also output the spherical harmonic coefficients of CMB dynamic topography contribution<parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20CMB_20dynamic_20topography_20contribution>`
-:name: parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20CMB_20dynamic_20topography_20contribution
-**Alias:** [Output CMB topography contribution coefficients](parameters:Postprocess/Geoid/Output_20CMB_20topography_20contribution_20coefficients)
-
-**Deprecation Status:** false
-::::
-
-::::{dropdown} __Parameter:__ {ref}`Also output the spherical harmonic coefficients of density anomaly contribution<parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20density_20anomaly_20contribution>`
-:name: parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20density_20anomaly_20contribution
-**Alias:** [Output density anomaly contribution coefficients](parameters:Postprocess/Geoid/Output_20density_20anomaly_20contribution_20coefficients)
-
-**Deprecation Status:** false
-::::
-
-::::{dropdown} __Parameter:__ {ref}`Also output the spherical harmonic coefficients of geoid anomaly<parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20geoid_20anomaly>`
-:name: parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20geoid_20anomaly
-**Alias:** [Output geoid anomaly coefficients](parameters:Postprocess/Geoid/Output_20geoid_20anomaly_20coefficients)
-
-**Deprecation Status:** false
-::::
-
-::::{dropdown} __Parameter:__ {ref}`Also output the spherical harmonic coefficients of surface dynamic topography contribution<parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20surface_20dynamic_20topography_20contribution>`
-:name: parameters:Postprocess/Geoid/Also_20output_20the_20spherical_20harmonic_20coefficients_20of_20surface_20dynamic_20topography_20contribution
-**Alias:** [Output surface topography contribution coefficients](parameters:Postprocess/Geoid/Output_20surface_20topography_20contribution_20coefficients)
 
 **Deprecation Status:** false
 ::::
@@ -1044,6 +1020,26 @@ Units: \si{\year} if the &rsquo;Use years instead of seconds&rsquo; parameter is
 **Pattern:** [Double 0...MAX_DOUBLE (inclusive)]
 
 **Documentation:** The density of water [kg/m3]
+::::
+
+(parameters:Postprocess/Self_2dgravitating_20geoid)=
+## **Subsection:** Postprocess / Self-gravitating geoid
+::::{dropdown} __Parameter:__ {ref}`Maximum degree<parameters:Postprocess/Self_2dgravitating_20geoid/Maximum_20degree>`
+:name: parameters:Postprocess/Self_2dgravitating_20geoid/Maximum_20degree
+**Default value:** 20
+
+**Pattern:** [Integer range 2...2147483647 (inclusive)]
+
+**Documentation:** Maximum spherical-harmonic degree.
+::::
+
+::::{dropdown} __Parameter:__ {ref}`Minimum degree<parameters:Postprocess/Self_2dgravitating_20geoid/Minimum_20degree>`
+:name: parameters:Postprocess/Self_2dgravitating_20geoid/Minimum_20degree
+**Default value:** 2
+
+**Pattern:** [Integer range 2...2147483647 (inclusive)]
+
+**Documentation:** Minimum spherical-harmonic degree.
 ::::
 
 (parameters:Postprocess/Topography)=

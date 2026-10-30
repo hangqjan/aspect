@@ -1,0 +1,33 @@
+# Common background-only inverse. Generated self-gravity observations are
+# included by the geoid and combined leaves after the reference run.
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/reference.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/inverse-base
+
+subsection Initial temperature model
+  set Model name = function
+  subsection Function
+    set Variable names = x,y,z
+    set Function expression = 1600
+  end
+end
+
+subsection Adjoint
+  set Solve mode = optimize
+  subsection Optimization
+    set Control field = temperature
+    set Maximum iterations = 12
+    # The spherical-shell L2 metric has dimensional volume units; use a
+    # correspondingly small absolute convergence threshold.
+    set Gradient tolerance = 1e-14
+    set Step tolerance = 1e-12
+    # This is an L2 radius. With SI radii the shell volume is O(1e20 m^3),
+    # so a 100 K field increment has an L2 norm of O(1e12 K m^(3/2)).
+    set Initial trust-region radius = 1e12
+    set L-BFGS history size = 3
+    set Lower bound = -200
+    set Upper bound = 200
+    set Output accepted controls = true
+    set Use physical temperature bounds = false
+  end
+end

@@ -74,8 +74,8 @@ subsection Postprocess
     set Maximum degree = 10
     set Minimum degree = 0
     set Output data in geographical coordinates = true
-    set Also output the spherical harmonic coefficients of geoid anomaly = true
-    set Also output the spherical harmonic coefficients of density anomaly contribution = true
+    set Output geoid anomaly coefficients = true
+    set Output density anomaly contribution coefficients = true
     set Include surface topography contribution = false
     set Include CMB topography contribution = false
     set Also output the gravity anomaly  = true

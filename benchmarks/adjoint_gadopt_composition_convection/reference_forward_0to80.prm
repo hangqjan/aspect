@@ -1,0 +1,5 @@
+# Physical step-0 to step-80 composition reference, with benchmark-local output.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/reference_forward.prm
+
+set Output directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/results_0to80/reference

@@ -1,0 +1,43 @@
+# Reconstruct the physical step-0 composition field from its step-80 field.
+
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/reference_forward_0to80.prm
+
+set Output directory        = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/results_0to80/inverse
+set Nonlinear solver scheme = single Advection, single Stokes, adjoint temperature
+
+subsection Initial composition model
+  set Model name = gadopt composition initial
+  subsection Gadopt composition initial
+    set Include localized anomaly = false
+  end
+end
+
+subsection Postprocess
+  set List of postprocessors = visualization
+end
+
+subsection Adjoint
+  set Solve mode = optimize
+  set List of objectives = composition field
+  subsection Composition field
+    set Field name = chemical
+    set Coordinate system = cartesian
+    set Observation source = file
+    subsection Observation file
+      set Data directory = $ASPECT_SOURCE_DIR/benchmarks/adjoint_gadopt_composition_convection/results_0to80/reference
+      set Data file name = terminal_composition.txt
+    end
+    subsection Weight function
+      set Variable names = x,y
+      set Function expression = 1
+    end
+  end
+  subsection Optimization
+    set Control field = chemical
+    set Maximum iterations = 12
+    set Initial trust-region radius = 1e-3
+    set L-BFGS history size = 3
+    set Use physical temperature bounds = true
+    set Output accepted controls = true
+  end
+end

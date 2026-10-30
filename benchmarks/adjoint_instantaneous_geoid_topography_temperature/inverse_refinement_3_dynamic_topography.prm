@@ -1,0 +1,19 @@
+include $ASPECT_SOURCE_DIR/benchmarks/adjoint_instantaneous_geoid_topography_temperature/inverse_refinement_3_base.prm
+
+set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-3/inverse-dynamic-topography
+
+subsection Adjoint
+  set List of objectives = dynamic topography
+  subsection Dynamic topography
+    set Target topography model = file
+    subsection Observation
+      set Observation source = file
+      set Observation format = ASPECT native
+      subsection ASPECT reference
+        set Output directory = benchmarks/adjoint_instantaneous_geoid_topography_temperature/results/refinement-3/reference
+        set Time selection = final
+        set Surface boundary = top
+      end
+    end
+  end
+end

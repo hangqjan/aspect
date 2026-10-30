@@ -630,6 +630,18 @@ namespace aspect
     }
 
 
+
+    template <int dim>
+    bool
+    Manager<dim>::instantaneous_stokes_workflow_enabled() const
+    {
+      using NonlinearSolver = typename Parameters<dim>::NonlinearSolver;
+
+      return this->get_parameters().nonlinear_solver
+             == NonlinearSolver::no_Advection_adjoint_Stokes;
+    }
+
+
     template <int dim>
     bool
     Manager<dim>::optimization_enabled() const

@@ -18,6 +18,7 @@
 #include <deal.II/base/parameter_handler.h>
 
 #include <memory>
+#include <string>
 
 namespace aspect
 {
@@ -27,7 +28,7 @@ namespace aspect
 
     /**
      * Own the configuration and ROL lifecycle of reduced
-     * initial-temperature optimization.
+     * initial scalar-advection-field optimization.
      *
      * The simulator-facing adjoint manager remains the evaluation adapter: it
      * restores the canonical forward state and supplies value/gradient pairs.
@@ -49,7 +50,7 @@ namespace aspect
         /** Parse and validate the optimization configuration. */
         void parse_parameters(ParameterHandler &prm);
 
-        /** Return whether reduced initial-temperature optimization is active. */
+        /** Return whether reduced scalar-field optimization is active. */
         bool enabled() const;
 
         /** Run one complete ROL optimization through @p adjoint_manager. */
@@ -84,7 +85,7 @@ namespace aspect
 
         CanonicalState canonical_state;
         std::unique_ptr<InitialTemperatureControl<dim>> control_space;
-        std::unique_ptr<LinearAlgebra::Vector> fixed_temperature;
+        std::unique_ptr<LinearAlgebra::Vector> fixed_control_field;
 
         bool optimization_enabled = false;
         unsigned int maximum_iterations = 1;
@@ -96,6 +97,8 @@ namespace aspect
         double upper_bound = 1e-2;
         unsigned int output_verbosity = 0;
         bool use_physical_temperature_bounds = false;
+        bool output_accepted_controls = false;
+        std::string control_field_name = "temperature";
     };
   }
 }

@@ -25,10 +25,29 @@
 #include <aspect/postprocess/interface.h>
 #include <aspect/simulator_access.h>
 
+#include <deal.II/lac/vector.h>
+
 namespace aspect
 {
   namespace Postprocess
   {
+    enum class BoundaryMeanDensityBoundary
+    {
+      top,
+      bottom
+    };
+
+    /**
+     * Apply the raw-density transpose of BoundaryDensities' area-weighted
+     * mean at one fixed boundary.  The returned values are active-cell
+     * averages, matching the adjoint-kernel repository convention.
+     */
+    template <int dim>
+    Vector<double>
+    compute_boundary_mean_density_transpose(
+      const SimulatorAccess<dim> &simulator_access,
+      const BoundaryMeanDensityBoundary boundary,
+      const double scalar_seed);
 
     /**
      * A postprocessor that computes the laterally averaged density
